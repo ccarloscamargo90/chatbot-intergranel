@@ -92,8 +92,49 @@ Para disparar notificaciones, tu ERP debe hacer `POST` a
 `/webhooks/erp/order-update` con el header `X-Webhook-Secret` (si configuras
 `ERP_WEBHOOK_SECRET`).
 
+## Despliegue en Railway
+
+El proyecto incluye configuración lista para [Railway](https://railway.com):
+
+- `railway.toml` — builder Nixpacks, comando de arranque y healthcheck en `/`.
+- `Procfile` — proceso web (`uvicorn`) como respaldo.
+- `.python-version` — fija Python 3.11.
+
+El servidor escucha en `0.0.0.0:$PORT` (Railway inyecta `$PORT`
+automáticamente; no lo configures a mano).
+
+### Pasos
+
+1. Crea un proyecto en Railway → **Deploy from GitHub repo** y elige este repo
+   (rama `main`). Railway detecta Python e instala `requirements.txt`.
+2. En **Variables**, define al menos:
+   - `ANTHROPIC_API_KEY`
+   - `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`
+   - `ERP_BASE_URL`, `ERP_API_KEY` (omítelas para usar el ERP simulado)
+   - `ERP_WEBHOOK_SECRET`, y `WHATSAPP_ORDER_TEMPLATE` si usas plantilla
+   - (opcional) `CLAUDE_MODEL` para cambiar de modelo
+   > La app arranca aunque falten variables: el healthcheck `/` responde y los
+   > clientes se inicializan al primer uso. Configura las claves antes de
+   > recibir tráfico real.
+3. En **Settings → Networking**, genera un dominio público
+   (`https://<tu-app>.up.railway.app`).
+4. Configura los webhooks con ese dominio:
+   - WhatsApp (Meta): `https://<tu-app>.up.railway.app/webhooks/whatsapp`
+   - ERP (notificaciones): `https://<tu-app>.up.railway.app/webhooks/erp/order-update`
+
+### Con Railway CLI (opcional)
+
+```bash
+npm i -g @railway/cli
+railway login
+railway init           # o: railway link  (a un proyecto existente)
+railway up             # despliega el código actual
+railway variables --set ANTHROPIC_API_KEY=sk-ant-...
+```
+
 ## Notas
 
 - El historial de conversación se guarda **en memoria** por número. Para
   producción, muévelo a Redis o una base de datos.
-- Ejecuta detrás de HTTPS (Meta lo exige para webhooks).
+- Ejecuta detrás de HTTPS (Meta lo exige para webhooks). Railway provee HTTPS
+  en el dominio generado.
