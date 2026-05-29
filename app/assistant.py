@@ -116,10 +116,19 @@ def _order_to_dict(order: Order) -> dict:
 class Assistant:
     def __init__(self, erp: ERPClient | None = None) -> None:
         settings = get_settings()
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._api_key = settings.anthropic_api_key or None
         self._model = settings.claude_model
         self._erp = erp or get_erp_client()
         self._history: dict[str, list] = {}
+        # El cliente se crea de forma diferida para que la app arranque aunque
+        # ANTHROPIC_API_KEY aún no esté configurada (útil en el primer deploy).
+        self._client: anthropic.AsyncAnthropic | None = None
+
+    @property
+    def client(self) -> anthropic.AsyncAnthropic:
+        if self._client is None:
+            self._client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        return self._client
 
     def _trim(self, history: list) -> list:
         """Limita el historial y garantiza que empiece en un turno de usuario
@@ -184,7 +193,7 @@ class Assistant:
 
         # Bucle agéntico: continúa mientras Claude solicite herramientas.
         while True:
-            response = await self._client.messages.create(
+            response = await self.client.messages.create(
                 model=self._model,
                 max_tokens=1024,
                 system=[
