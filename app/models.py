@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -18,14 +16,14 @@ class Order(BaseModel):
 
     id: str
     cliente: str
-    telefono: Optional[str] = None
+    telefono: str | None = None
     estado: str
-    total: Optional[float] = None
+    total: float | None = None
     moneda: str = "MXN"
-    fecha: Optional[str] = None
-    fecha_entrega_estimada: Optional[str] = None
+    fecha: str | None = None
+    fecha_entrega_estimada: str | None = None
     lineas: list[OrderLine] = Field(default_factory=list)
-    notas: Optional[str] = None
+    notas: str | None = None
 
 
 class OrderEvent(BaseModel):
@@ -35,6 +33,6 @@ class OrderEvent(BaseModel):
     order_id: str
     telefono: str  # destino en formato E.164 sin '+', p.ej. 5215512345678
     estado_nuevo: str
-    cliente: Optional[str] = None
+    cliente: str | None = None
     # Texto opcional para sobrescribir el mensaje generado automáticamente.
-    mensaje: Optional[str] = None
+    mensaje: str | None = None

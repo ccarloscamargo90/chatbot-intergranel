@@ -22,10 +22,19 @@ ESTADO_MENSAJES: dict[str, str] = {
     "en_proceso": "🔄 Su orden {order_id} está en preparación.",
     "en_ruta": "🚚 Su orden {order_id} va en camino. Le avisaremos al llegar.",
     "entregada": "📦 Su orden {order_id} fue entregada. ¡Gracias por confiar en Intergranel!",
-    "retrasada": "⏳ Su orden {order_id} presenta un retraso. Un asesor le contactará con los detalles.",
-    "cancelada": "❌ Su orden {order_id} ha sido cancelada. Si tiene dudas, responda a este mensaje.",
+    "retrasada": (
+        "⏳ Su orden {order_id} presenta un retraso. "
+        "Un asesor le contactará con los detalles."
+    ),
+    "cancelada": (
+        "❌ Su orden {order_id} ha sido cancelada. "
+        "Si tiene dudas, responda a este mensaje."
+    ),
     "factura_disponible": "🧾 La factura de su orden {order_id} ya está disponible.",
-    "pago_pendiente": "💳 Su orden {order_id} tiene un pago pendiente. Responda a este mensaje para más información.",
+    "pago_pendiente": (
+        "💳 Su orden {order_id} tiene un pago pendiente. "
+        "Responda a este mensaje para más información."
+    ),
 }
 
 

@@ -132,6 +132,21 @@ railway up             # despliega el código actual
 railway variables --set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+## Pruebas y CI
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .        # lint
+pytest -q           # tests
+```
+
+Las pruebas no requieren credenciales: usan el ERP simulado y WhatsApp en modo
+desarrollo, y **no** invocan a Claude. GitHub Actions (`.github/workflows/ci.yml`)
+ejecuta lint + tests en cada push y PR a `main`.
+
+> Al implementar nuevas funciones del chatbot, agrega/actualiza las pruebas en
+> `tests/` para mantener el CI en verde y cubrir el comportamiento nuevo.
+
 ## Notas
 
 - El historial de conversación se guarda **en memoria** por número. Para
