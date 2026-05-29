@@ -16,19 +16,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Diagnóstico de entorno
-        run: |
-          python --version
-          python -m pip --version
+          cache: pip
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
-
-      - name: Listar dependencias instaladas
-        run: python -m pip list
 
       - name: Lint (ruff)
         run: ruff check .
