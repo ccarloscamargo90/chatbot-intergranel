@@ -153,7 +153,10 @@ ejecuta lint + tests en cada push y PR a `main`.
 
 ## Notas
 
-- El historial de conversación se guarda **en memoria** por número. Para
-  producción, muévelo a Redis o una base de datos.
+- El historial de conversación se persiste en **Redis** si defines `REDIS_URL`
+  (con TTL configurable vía `HISTORY_TTL_SECONDS`, por defecto 7 días); así
+  sobrevive a reinicios y se comparte entre réplicas. Sin `REDIS_URL`, se usa
+  un store **en memoria** (solo desarrollo). En Railway puedes añadir un
+  plugin de Redis y usar la variable `REDIS_URL` que expone.
 - Ejecuta detrás de HTTPS (Meta lo exige para webhooks). Railway provee HTTPS
   en el dominio generado.

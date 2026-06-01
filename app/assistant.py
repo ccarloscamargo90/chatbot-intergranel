@@ -14,6 +14,7 @@ import anthropic
 
 from .config import get_settings
 from .erp import ERPClient, get_erp_client
+from .history import HistoryStore, get_history_store
 from .models import Order
 
 logger = logging.getLogger(__name__)
@@ -114,12 +115,16 @@ def _order_to_dict(order: Order) -> dict:
 
 
 class Assistant:
-    def __init__(self, erp: ERPClient | None = None) -> None:
+    def __init__(
+        self,
+        erp: ERPClient | None = None,
+        history_store: HistoryStore | None = None,
+    ) -> None:
         settings = get_settings()
         self._api_key = settings.anthropic_api_key or None
         self._model = settings.claude_model
         self._erp = erp or get_erp_client()
-        self._history: dict[str, list] = {}
+        self._history_store = history_store or get_history_store()
         # El cliente se crea de forma diferida para que la app arranque aunque
         # ANTHROPIC_API_KEY aún no esté configurada (útil en el primer deploy).
         self._client: anthropic.AsyncAnthropic | None = None
@@ -188,7 +193,7 @@ class Assistant:
 
     async def handle(self, phone: str, user_text: str) -> str:
         """Procesa un mensaje entrante y devuelve la respuesta del asistente."""
-        history = self._history.setdefault(phone, [])
+        history = await self._history_store.load(phone)
         history.append({"role": "user", "content": user_text})
 
         # Bucle agéntico: continúa mientras Claude solicite herramientas.
@@ -206,7 +211,15 @@ class Assistant:
                 tools=TOOLS,
                 messages=history,
             )
-            history.append({"role": "assistant", "content": response.content})
+            # Serializamos el contenido del asistente a dicts (formato canónico de
+            # entrada de la API) para que el historial sea JSON-serializable y
+            # persistible en Redis.
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": [b.model_dump(mode="json") for b in response.content],
+                }
+            )
 
             if response.stop_reason == "tool_use":
                 tool_results = []
@@ -227,5 +240,5 @@ class Assistant:
             reply = "".join(
                 b.text for b in response.content if getattr(b, "type", "") == "text"
             ).strip()
-            self._history[phone] = self._trim(history)
+            await self._history_store.save(phone, self._trim(history))
             return reply or "Disculpe, no pude generar una respuesta. ¿Puede reformular su mensaje?"

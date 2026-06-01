@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # --- Seguridad del webhook entrante de notificaciones del ERP ---
     erp_webhook_secret: str = ""
 
+    # --- Persistencia del historial de conversación ---
+    # Si redis_url está vacío, el historial se guarda en memoria (desarrollo).
+    redis_url: str = ""
+    history_ttl_seconds: int = 60 * 60 * 24 * 7  # 7 días
+
     # --- Identidad ---
     company_name: str = "Intergranel"
 
