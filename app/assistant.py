@@ -42,6 +42,9 @@ ofrece escalar con un asesor humano.
 - Si el cliente está molesto, tiene un reclamo, pide algo fuera de tu alcance \
 (cambiar precios, cancelar, renegociar) o solicita hablar con una persona, \
 usa `escalar_a_humano`.
+- El cliente puede enviarte imágenes (p. ej. una foto de una remisión o \
+comprobante) o documentos PDF. Léelos y úsalos para ayudar; si necesitas el \
+número de orden y aparece en el documento, úsalo para consultarla.
 
 Estilo de respuesta:
 - Mensajes breves y bien formateados para WhatsApp (sin Markdown pesado; \
@@ -191,10 +194,25 @@ class Assistant:
             logger.exception("Error ejecutando herramienta %s", name)
             return json.dumps({"error": str(exc)})
 
-    async def handle(self, phone: str, user_text: str) -> str:
-        """Procesa un mensaje entrante y devuelve la respuesta del asistente."""
+    async def handle(
+        self,
+        phone: str,
+        content: str | list,
+        store_text: str | None = None,
+    ) -> str:
+        """Procesa un mensaje entrante y devuelve la respuesta del asistente.
+
+        `content` es el contenido del turno del usuario para la API: un string
+        (texto) o una lista de bloques (imagen/documento + texto). `store_text`
+        es la versión que se persiste en el historial; para multimedia conviene
+        un placeholder de texto para no almacenar ni reenviar base64 pesado. Si
+        es None, se usa `content` cuando es texto.
+        """
+        if store_text is None:
+            store_text = content if isinstance(content, str) else "[contenido multimedia]"
         history = await self._history_store.load(phone)
-        history.append({"role": "user", "content": user_text})
+        history.append({"role": "user", "content": content})
+        user_index = len(history) - 1
 
         # Bucle agéntico: continúa mientras Claude solicite herramientas.
         while True:
@@ -240,5 +258,8 @@ class Assistant:
             reply = "".join(
                 b.text for b in response.content if getattr(b, "type", "") == "text"
             ).strip()
+            # Sustituimos el turno del usuario por su placeholder de texto antes de
+            # persistir, para no guardar ni reenviar base64 de imágenes/PDF.
+            history[user_index] = {"role": "user", "content": store_text}
             await self._history_store.save(phone, self._trim(history))
             return reply or "Disculpe, no pude generar una respuesta. ¿Puede reformular su mensaje?"

@@ -153,6 +153,12 @@ ejecuta lint + tests en cada push y PR a `main`.
 
 ## Notas
 
+- El bot acepta **texto, imágenes y documentos PDF**. Las imágenes (JPEG, PNG,
+  GIF, WebP) y los PDF que envíe el cliente se descargan vía la Cloud API y se
+  pasan a Claude (visión / lectura de documentos). En el historial solo se
+  guarda un texto-placeholder, no el base64, para no inflar Redis ni reenviar
+  el archivo en cada turno. Otros tipos (audio, video, ubicación) se responden
+  con un aviso.
 - Los webhooks de WhatsApp se **deduplican por `message.id`** (Meta reintenta
   entregas): cada id se registra con TTL (`DEDUP_TTL_SECONDS`, 1 día por
   defecto) y los reenvíos se ignoran. Con `REDIS_URL` la deduplicación es

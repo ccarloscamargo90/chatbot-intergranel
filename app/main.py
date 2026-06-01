@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 
@@ -72,6 +73,56 @@ async def incoming_whatsapp(request: Request, background: BackgroundTasks) -> di
     return {"status": "received"}
 
 
+# Tipos de media soportados y límites de tamaño (bytes).
+SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024       # 5 MB (límite de imágenes de Claude)
+MAX_PDF_BYTES = 16 * 1024 * 1024        # 16 MB (margen conservador)
+
+
+async def _build_media_content(message: dict) -> tuple[list, str] | None:
+    """Construye el contenido para la API a partir de un mensaje de imagen o
+    documento de WhatsApp. Devuelve (content, store_text) o None si el tipo o
+    tamaño no es soportado."""
+    mtype = message["type"]
+    media = message.get(mtype, {})
+    media_id = media.get("id")
+    if not media_id:
+        return None
+    mime = media.get("mime_type", "")
+    caption = (media.get("caption") or "").strip()
+
+    media_url = await wa.get_media_url(media_id)
+    raw = await wa.download_media(media_url)
+
+    if mtype == "image" and mime in SUPPORTED_IMAGE_TYPES:
+        if len(raw) > MAX_IMAGE_BYTES:
+            return None
+        data = base64.standard_b64encode(raw).decode()
+        blocks: list = [
+            {"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}
+        ]
+        placeholder = "[imagen recibida]"
+    elif mtype == "document" and mime == "application/pdf":
+        if len(raw) > MAX_PDF_BYTES:
+            return None
+        data = base64.standard_b64encode(raw).decode()
+        filename = media.get("filename") or "documento.pdf"
+        blocks = [
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+            }
+        ]
+        placeholder = f"[documento PDF recibido: {filename}]"
+    else:
+        return None
+
+    if caption:
+        blocks.append({"type": "text", "text": caption})
+        placeholder = f"{placeholder} {caption}".strip()
+    return blocks, placeholder
+
+
 async def _process_message(message: dict) -> None:
     phone = message.get("from")
     if not phone:
@@ -82,16 +133,32 @@ async def _process_message(message: dict) -> None:
         logger.info("Mensaje duplicado ignorado: %s", message_id)
         return
     try:
-        if message.get("type") != "text":
-            await wa.send_text(
-                phone,
-                "Por ahora solo puedo atender mensajes de texto. "
-                "¿En qué puedo ayudarle con sus órdenes? 🙂",
-            )
+        mtype = message.get("type")
+        if mtype == "text":
+            text = message["text"]["body"]
+            reply = await assistant.handle(phone, text)
+            await wa.send_text(phone, reply)
             return
-        text = message["text"]["body"]
-        reply = await assistant.handle(phone, text)
-        await wa.send_text(phone, reply)
+
+        if mtype in ("image", "document"):
+            built = await _build_media_content(message)
+            if built is None:
+                await wa.send_text(
+                    phone,
+                    "Puedo leer imágenes y documentos PDF (hasta unos pocos MB). "
+                    "¿Podría reenviarlo en ese formato o escribir su consulta?",
+                )
+                return
+            content, store_text = built
+            reply = await assistant.handle(phone, content, store_text)
+            await wa.send_text(phone, reply)
+            return
+
+        await wa.send_text(
+            phone,
+            "Por ahora puedo atender texto, imágenes y documentos PDF. "
+            "¿En qué puedo ayudarle con sus órdenes? 🙂",
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Error procesando mensaje de %s", phone)
         try:

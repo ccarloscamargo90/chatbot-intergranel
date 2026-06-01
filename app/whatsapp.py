@@ -32,10 +32,8 @@ class WhatsAppClient:
     def __init__(self) -> None:
         settings = get_settings()
         self._token = settings.whatsapp_token
-        self._url = (
-            f"https://graph.facebook.com/{settings.whatsapp_api_version}"
-            f"/{settings.whatsapp_phone_number_id}/messages"
-        )
+        self._graph = f"https://graph.facebook.com/{settings.whatsapp_api_version}"
+        self._url = f"{self._graph}/{settings.whatsapp_phone_number_id}/messages"
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -95,3 +93,22 @@ class WhatsAppClient:
             },
         }
         return await self._post(payload)
+
+    async def get_media_url(self, media_id: str) -> str:
+        """Resuelve la URL de descarga (temporal) de un media a partir de su id."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self._graph}/{media_id}",
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            resp.raise_for_status()
+            return resp.json()["url"]
+
+    async def download_media(self, media_url: str) -> bytes:
+        """Descarga el binario de un media (la URL requiere el token)."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                media_url, headers={"Authorization": f"Bearer {self._token}"}
+            )
+            resp.raise_for_status()
+            return resp.content
