@@ -2,11 +2,22 @@
 
 Define una interfaz `ERPClient` con dos implementaciones:
 
-- `HTTPERPClient`: consulta un ERP real vía HTTP (configurado con ERP_BASE_URL).
+- `HTTPERPClient`: consulta el ERP real vía HTTP.
 - `MockERPClient`: datos de ejemplo en memoria para desarrollar sin ERP.
 
-Para conectar tu ERP real, ajusta las rutas/campos en `HTTPERPClient` para
-que coincidan con tu API, o adapta el parseo en `_to_order`.
+Contrato esperado (lo expone el ERP; ver `docs/erp/` para la implementación de
+referencia en NestJS):
+
+    GET {ERP_BASE_URL}/bot/ordenes/{folio}          -> Order (JSON) | 404
+    GET {ERP_BASE_URL}/bot/ordenes?telefono={tel}   -> [Order, ...] (JSON)
+
+donde `Order` es el modelo de `app/models.py`. En el ERP, la "orden del
+cliente" corresponde a un Contrato (folio CONT-YYYY-NNNN); el endpoint adapta
+Contrato/Embarque/Factura a este contrato.
+
+Autenticación (configurable):
+- Si `ERP_API_KEY_HEADER` está definido, la API key viaja en ese header.
+- Si no, y hay `ERP_API_KEY`, se envía como `Authorization: Bearer <key>`.
 """
 
 from __future__ import annotations
@@ -22,7 +33,7 @@ from .models import Order, OrderLine
 class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def get_order(self, order_id: str) -> Order | None:
-        """Devuelve una orden por su ID, o None si no existe."""
+        """Devuelve una orden por su folio, o None si no existe."""
 
     @abc.abstractmethod
     async def list_orders_by_phone(self, phone: str) -> list[Order]:
@@ -30,63 +41,72 @@ class ERPClient(abc.ABC):
 
 
 class HTTPERPClient(ERPClient):
-    """Consulta un ERP/API externo. Asume un contrato REST sencillo:
-
-        GET {base}/orders/{id}            -> objeto Order (JSON)
-        GET {base}/orders?telefono={tel}  -> lista de Order (JSON)
-
-    Ajusta estas rutas si tu ERP usa otra forma."""
-
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        api_key_header: str = "",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._api_key = api_key
+        self._api_key_header = api_key_header
+        self._transport = transport  # inyectable en pruebas
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._api_key_header and self._api_key:
+            return {self._api_key_header: self._api_key}
+        if self._api_key:
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {}
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=15, headers=self._auth_headers(), transport=self._transport
+        )
 
     async def get_order(self, order_id: str) -> Order | None:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{self._base_url}/orders/{order_id}", headers=self._headers
-            )
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/ordenes/{order_id}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
             return Order(**resp.json())
 
     async def list_orders_by_phone(self, phone: str) -> list[Order]:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with self._client() as client:
             resp = await client.get(
-                f"{self._base_url}/orders",
-                params={"telefono": phone},
-                headers=self._headers,
+                f"{self._base_url}/bot/ordenes", params={"telefono": phone}
             )
             resp.raise_for_status()
             return [Order(**item) for item in resp.json()]
 
 
 class MockERPClient(ERPClient):
-    """Datos de ejemplo en memoria para desarrollo local."""
+    """Datos de ejemplo en memoria para desarrollo local, alineados al dominio
+    del ERP (folios CONT-..., estados EstadoContrato/EstadoEmbarque)."""
 
     def __init__(self) -> None:
         self._orders: dict[str, Order] = {
-            "OC-1001": Order(
-                id="OC-1001",
+            "CONT-2026-0001": Order(
+                id="CONT-2026-0001",
                 cliente="Molinos del Bajío S.A.",
                 telefono="5215512345678",
-                estado="en_ruta",
+                estado="EN_PROCESO",
+                estado_embarque="EN_TRANSITO",
+                estado_factura="EMITIDA",
                 total=185000.0,
                 moneda="MXN",
                 fecha="2026-05-20",
                 fecha_entrega_estimada="2026-05-31",
-                lineas=[
-                    OrderLine(producto="Maíz amarillo", cantidad=50, unidad="ton"),
-                    OrderLine(producto="Sorgo", cantidad=20, unidad="ton"),
-                ],
+                lineas=[OrderLine(producto="Maíz amarillo", cantidad=50, unidad="ton")],
                 notas="Entrega en planta Querétaro, horario 8-14h.",
             ),
-            "OC-1002": Order(
-                id="OC-1002",
+            "CONT-2026-0002": Order(
+                id="CONT-2026-0002",
                 cliente="Molinos del Bajío S.A.",
                 telefono="5215512345678",
-                estado="en_proceso",
+                estado="ACTIVO",
                 total=92000.0,
                 moneda="MXN",
                 fecha="2026-05-27",
@@ -106,4 +126,8 @@ def get_erp_client() -> ERPClient:
     settings = get_settings()
     if settings.use_mock_erp:
         return MockERPClient()
-    return HTTPERPClient(settings.erp_base_url, settings.erp_api_key)
+    return HTTPERPClient(
+        settings.erp_base_url,
+        api_key=settings.erp_api_key,
+        api_key_header=settings.erp_api_key_header,
+    )

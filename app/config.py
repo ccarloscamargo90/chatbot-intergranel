@@ -35,8 +35,13 @@ class Settings(BaseSettings):
 
     # --- ERP / API externo de órdenes ---
     # Si erp_base_url está vacío, se usa un ERP simulado en memoria (para desarrollo).
+    # erp_base_url debe incluir el prefijo de la API, p. ej.:
+    #   https://erp-intergranel.example.com/api/v1
     erp_base_url: str = ""
     erp_api_key: str = ""
+    # Si se define, la API key se envía en este header (p. ej. "X-Bot-Api-Key").
+    # Si se deja vacío y hay erp_api_key, se envía como "Authorization: Bearer ...".
+    erp_api_key_header: str = ""
 
     # --- Seguridad del webhook entrante de notificaciones del ERP ---
     erp_webhook_secret: str = ""

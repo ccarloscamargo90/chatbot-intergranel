@@ -17,7 +17,9 @@ class Order(BaseModel):
     id: str
     cliente: str
     telefono: str | None = None
-    estado: str
+    estado: str  # estado del contrato (EstadoContrato del ERP)
+    estado_embarque: str | None = None  # estado del último embarque, si existe
+    estado_factura: str | None = None  # estado de facturación, si existe
     total: float | None = None
     moneda: str = "MXN"
     fecha: str | None = None

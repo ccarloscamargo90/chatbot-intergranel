@@ -86,15 +86,26 @@ curl -X POST http://localhost:8000/webhooks/erp/order-update \
 
 ## Conectar tu ERP
 
-El bot espera un contrato REST sencillo (ajustable en `app/erp.py`):
+El bot espera este contrato REST (ajustable en `app/erp.py`). `ERP_BASE_URL`
+debe incluir el prefijo, p. ej. `https://erp-intergranel.example.com/api/v1`:
 
-- `GET {ERP_BASE_URL}/orders/{id}` → una orden (JSON)
-- `GET {ERP_BASE_URL}/orders?telefono={tel}` → lista de órdenes (JSON)
+- `GET {ERP_BASE_URL}/bot/ordenes/{folio}` → una orden (`Order` JSON) | `404`
+- `GET {ERP_BASE_URL}/bot/ordenes?telefono={tel}` → lista de `Order` (JSON)
 
-El formato de cada orden es el del modelo `Order` (ver `app/models.py`).
+El formato de cada orden es el modelo `Order` de `app/models.py`. En el ERP de
+Intergranel (NestJS), la "orden del cliente" corresponde a un **Contrato**
+(folio `CONT-YYYY-NNNN`); el endpoint adapta Contrato/Embarque/Factura a este
+contrato. **Implementación de referencia para el ERP en
+[`docs/erp/`](docs/erp/).**
+
+Autenticación: si defines `ERP_API_KEY_HEADER` (p. ej. `X-Bot-Api-Key`), la
+API key viaja en ese header; si no, como `Authorization: Bearer <ERP_API_KEY>`.
+
 Para disparar notificaciones, tu ERP debe hacer `POST` a
 `/webhooks/erp/order-update` con el header `X-Webhook-Secret` (si configuras
-`ERP_WEBHOOK_SECRET`).
+`ERP_WEBHOOK_SECRET`). El `estado_nuevo` acepta los enums del ERP
+(`EstadoContrato`/`EstadoEmbarque`/`EstadoFactura`); valores desconocidos usan
+un mensaje genérico.
 
 ## Despliegue en Railway
 

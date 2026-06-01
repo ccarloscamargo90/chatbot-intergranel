@@ -22,16 +22,20 @@ def assistant() -> Assistant:
 
 def test_consultar_orden_existente(assistant):
     raw = asyncio.run(
-        assistant._run_tool("consultar_orden", {"order_id": "OC-1001"}, "5215512345678")
+        assistant._run_tool(
+            "consultar_orden", {"order_id": "CONT-2026-0001"}, "5215512345678"
+        )
     )
     data = json.loads(raw)
     assert data["encontrada"] is True
-    assert data["orden"]["id"] == "OC-1001"
+    assert data["orden"]["id"] == "CONT-2026-0001"
 
 
 def test_consultar_orden_inexistente(assistant):
     raw = asyncio.run(
-        assistant._run_tool("consultar_orden", {"order_id": "OC-9999"}, "5215512345678")
+        assistant._run_tool(
+            "consultar_orden", {"order_id": "CONT-9999"}, "5215512345678"
+        )
     )
     data = json.loads(raw)
     assert data["encontrada"] is False
