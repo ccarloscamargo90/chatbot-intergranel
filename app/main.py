@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
@@ -10,7 +11,7 @@ from .assistant import Assistant
 from .config import get_settings
 from .models import OrderEvent
 from .notifications import notify_order_event
-from .whatsapp import WhatsAppClient
+from .whatsapp import WhatsAppClient, verify_signature
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("intergranel")
@@ -53,7 +54,13 @@ async def verify_whatsapp(request: Request) -> Response:
 # --------------------------------------------------------------------------- #
 @app.post("/webhooks/whatsapp")
 async def incoming_whatsapp(request: Request, background: BackgroundTasks) -> dict:
-    body = await request.json()
+    raw = await request.body()
+    # Validamos la firma de Meta sobre el cuerpo crudo (si hay app secret).
+    if settings.whatsapp_app_secret and not verify_signature(
+        raw, request.headers.get("X-Hub-Signature-256"), settings.whatsapp_app_secret
+    ):
+        raise HTTPException(status_code=401, detail="Firma inválida")
+    body = json.loads(raw or b"{}")
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})

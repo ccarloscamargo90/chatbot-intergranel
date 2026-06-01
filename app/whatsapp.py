@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from typing import Any
 
@@ -10,6 +12,20 @@ import httpx
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def verify_signature(payload: bytes, header: str | None, app_secret: str) -> bool:
+    """Valida la firma X-Hub-Signature-256 que Meta envía en cada webhook.
+
+    Meta firma el cuerpo crudo de la petición con HMAC-SHA256 usando el
+    App Secret y lo envía en el header como 'sha256=<hex>'. Comparamos en
+    tiempo constante para evitar ataques de temporización.
+    """
+    if not header or not header.startswith("sha256="):
+        return False
+    expected = header.split("=", 1)[1].strip()
+    digest = hmac.new(app_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(digest, expected)
 
 
 class WhatsAppClient:

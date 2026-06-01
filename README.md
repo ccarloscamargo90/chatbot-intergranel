@@ -74,7 +74,11 @@ curl -X POST http://localhost:8000/webhooks/erp/order-update \
 3. Configura el webhook apuntando a `https://TU_DOMINIO/webhooks/whatsapp` con
    el *verify token* de `WHATSAPP_VERIFY_TOKEN`, y suscríbete al campo
    `messages`.
-4. Para notificaciones proactivas (fuera de la ventana de 24h) necesitas una
+4. Copia el **App Secret** de la app de Meta en `WHATSAPP_APP_SECRET`. El bot
+   valida la firma `X-Hub-Signature-256` (HMAC-SHA256 del cuerpo crudo) de cada
+   webhook entrante y rechaza con `401` las peticiones no firmadas o alteradas.
+   Si se deja vacío, la verificación se omite (solo para desarrollo).
+5. Para notificaciones proactivas (fuera de la ventana de 24h) necesitas una
    **plantilla aprobada**; pon su nombre en `WHATSAPP_ORDER_TEMPLATE`.
 
 > Para exponer tu servidor local durante pruebas puedes usar un túnel

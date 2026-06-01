@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     whatsapp_token: str = ""              # token del system user / acceso permanente
     whatsapp_phone_number_id: str = ""    # ID del número emisor (no el número en sí)
     whatsapp_verify_token: str = "intergranel-verify"  # para verificar el webhook (GET)
+    # App Secret de la app de Meta, para validar la firma X-Hub-Signature-256 de
+    # los webhooks entrantes. Si se deja vacío, la verificación se omite (modo
+    # desarrollo). Configúralo en producción.
+    whatsapp_app_secret: str = ""
     whatsapp_api_version: str = "v21.0"
     # Plantilla aprobada para notificaciones proactivas (mensajes iniciados por el negocio).
     # Si se deja vacío, las notificaciones se envían como texto libre (solo válido
