@@ -16,8 +16,11 @@ from .whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
-# Mensajes legibles por estado de la orden.
+# Mensajes legibles por estado de la orden. Las claves se comparan en
+# minúsculas, e incluyen tanto valores propios del bot como los enums del ERP
+# (EstadoContrato / EstadoEmbarque / EstadoFactura).
 ESTADO_MENSAJES: dict[str, str] = {
+    # Genéricos / bot
     "confirmada": "✅ Su orden {order_id} ha sido confirmada. ¡Gracias por su compra!",
     "en_proceso": "🔄 Su orden {order_id} está en preparación.",
     "en_ruta": "🚚 Su orden {order_id} va en camino. Le avisaremos al llegar.",
@@ -35,6 +38,24 @@ ESTADO_MENSAJES: dict[str, str] = {
         "💳 Su orden {order_id} tiene un pago pendiente. "
         "Responda a este mensaje para más información."
     ),
+    # EstadoContrato
+    "activo": "✅ Su contrato {order_id} está activo. ¡Gracias por su compra!",
+    "completado": "📦 Su orden {order_id} se completó. ¡Gracias por confiar en Intergranel!",
+    "cancelado": (
+        "❌ Su orden {order_id} ha sido cancelada. "
+        "Si tiene dudas, responda a este mensaje."
+    ),
+    # EstadoEmbarque
+    "programado": "📅 El embarque de su orden {order_id} está programado.",
+    "en_transito": "🚚 Su orden {order_id} va en camino. Le avisaremos al llegar.",
+    "entregado": "📦 Su orden {order_id} fue entregada. ¡Gracias por confiar en Intergranel!",
+    "incidencia": (
+        "⚠️ Hubo una incidencia con el embarque de su orden {order_id}. "
+        "Un asesor le contactará."
+    ),
+    # EstadoFactura
+    "emitida": "🧾 La factura de su orden {order_id} ya está disponible.",
+    "cobrada": "💳 Hemos registrado el pago total de su orden {order_id}. ¡Gracias!",
 }
 
 
@@ -42,7 +63,7 @@ def build_message(event: OrderEvent) -> str:
     if event.mensaje:
         return event.mensaje
     plantilla = ESTADO_MENSAJES.get(
-        event.estado_nuevo,
+        event.estado_nuevo.lower(),
         "ℹ️ Su orden {order_id} cambió de estado a: " + event.estado_nuevo + ".",
     )
     return plantilla.format(order_id=event.order_id)
