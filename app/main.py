@@ -9,6 +9,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 
 from .assistant import Assistant
 from .config import get_settings
+from .dedup import get_dedup_store
 from .models import OrderEvent
 from .notifications import notify_order_event
 from .whatsapp import WhatsAppClient, verify_signature
@@ -21,6 +22,7 @@ app = FastAPI(title="Intergranel · Asistente de WhatsApp")
 
 wa = WhatsAppClient()
 assistant = Assistant()
+dedup = get_dedup_store()
 
 
 @app.get("/")
@@ -73,6 +75,11 @@ async def incoming_whatsapp(request: Request, background: BackgroundTasks) -> di
 async def _process_message(message: dict) -> None:
     phone = message.get("from")
     if not phone:
+        return
+    # Idempotencia: ignora reenvíos del mismo mensaje (Meta reintenta webhooks).
+    message_id = message.get("id")
+    if message_id and await dedup.is_duplicate(message_id):
+        logger.info("Mensaje duplicado ignorado: %s", message_id)
         return
     try:
         if message.get("type") != "text":

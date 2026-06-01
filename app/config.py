@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # Si redis_url está vacío, el historial se guarda en memoria (desarrollo).
     redis_url: str = ""
     history_ttl_seconds: int = 60 * 60 * 24 * 7  # 7 días
+    # TTL de los ids de mensaje ya procesados (deduplicación de webhooks).
+    dedup_ttl_seconds: int = 60 * 60 * 24  # 1 día
 
     # --- Identidad ---
     company_name: str = "Intergranel"
