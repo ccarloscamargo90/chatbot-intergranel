@@ -153,6 +153,10 @@ ejecuta lint + tests en cada push y PR a `main`.
 
 ## Notas
 
+- Los webhooks de WhatsApp se **deduplican por `message.id`** (Meta reintenta
+  entregas): cada id se registra con TTL (`DEDUP_TTL_SECONDS`, 1 día por
+  defecto) y los reenvíos se ignoran. Con `REDIS_URL` la deduplicación es
+  atómica y correcta entre réplicas; sin él, es en memoria (solo desarrollo).
 - El historial de conversación se persiste en **Redis** si defines `REDIS_URL`
   (con TTL configurable vía `HISTORY_TTL_SECONDS`, por defecto 7 días); así
   sobrevive a reinicios y se comparte entre réplicas. Sin `REDIS_URL`, se usa
