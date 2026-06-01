@@ -29,6 +29,7 @@ async def health() -> dict:
         "status": "ok",
         "service": "intergranel-whatsapp-assistant",
         "erp": "mock" if settings.use_mock_erp else "http",
+        "history": "redis" if settings.redis_url else "memory",
         "model": settings.claude_model,
     }
 
