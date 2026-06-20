@@ -103,7 +103,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 86 tests pasando
+pytest -q                  # 97 tests pasando
 ```
 
 ## Estado actual y fases
@@ -111,14 +111,17 @@ pytest -q                  # 86 tests pasando
 ### Fase 1 ✅ — Router + refactorización
 Completada. Router, bus, BaseAgent, 4 agentes (Soporte y Ventas funcionales, Compras e Inventario stubs).
 
-### Fase 2 — Agente de Ventas → ERP real
-Reemplazar PRECIOS_MOCK en agents/ventas.py por llamadas HTTP al ERP.
-Endpoints a implementar en el ERP (NestJS):
+### Fase 2 ✅ — Agente de Ventas → ERP real
+Completada. `agents/ventas.py` ya no tiene precios hardcodeados: consulta el ERP
+vía `ERPClient` (HTTP si hay `ERP_BASE_URL`, mock en desarrollo). Se extendió
+`ERPClient` con `get_price()`, `list_prices()`, `create_quote()`,
+`create_request()` (abstracto + `HTTPERPClient` + `MockERPClient`) y se
+añadieron los modelos `Price`, `Quote`, `PurchaseRequest`.
+Endpoints que el ERP (NestJS) debe exponer:
 - `GET /api/v1/bot/precios/:producto` → `{ producto, precio_ton, moneda, disponible_ton, vigencia }`
 - `GET /api/v1/bot/precios` → lista de precios vigentes
-- `POST /api/v1/bot/cotizaciones` → `{ id, producto, cantidad, total, vigencia, estado }`
-- `POST /api/v1/bot/solicitudes` → `{ id, estado: "pendiente" }`
-Extender ERPClient con: get_price(), list_prices(), create_quote(), create_request().
+- `POST /api/v1/bot/cotizaciones` (body `{ producto, cantidad, telefono }`) → `{ id, producto, cantidad, total, vigencia, estado }`
+- `POST /api/v1/bot/solicitudes` (body `{ producto, cantidad, telefono }`) → `{ id, estado: "pendiente" }`
 
 ### Fase 3 — Agente de Compras completo
 Implementar tools reales: consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores.
@@ -132,18 +135,18 @@ Notificaciones proactivas al equipo cuando un producto cae bajo umbral.
 
 ## Especificación de agentes
 
-### Ventas (agents/ventas.py) — Funcional con mock
+### Ventas (agents/ventas.py) — Funcional vía ERP (mock o HTTP)
 
 | Tool | Params requeridos | Qué hace |
 |---|---|---|
-| consultar_precio | producto | Precio/ton, disponibilidad, vigencia |
-| generar_cotizacion | producto, cantidad_ton | Cotización con total. Publica en bus |
+| consultar_precio | producto | Precio/ton, disponibilidad, vigencia (ERP `get_price`) |
+| generar_cotizacion | producto, cantidad_ton | Cotización con total (ERP `create_quote`). Publica en bus |
 | consultar_contrato | folio | Estado de contrato (usa ERP) |
 | listar_contratos_cliente | — | Contratos del remitente (usa ERP) |
-| solicitar_pedido | producto, cantidad_ton | Registra solicitud. Publica en bus |
+| solicitar_pedido | producto, cantidad_ton | Registra solicitud (ERP `create_request`). Publica en bus |
 | transferir_a_soporte | motivo | Cambia agente activo en bus |
 
-Precios mock: maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
+Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
 
 ### Soporte (agents/soporte.py) — Funcional
 

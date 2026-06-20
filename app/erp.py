@@ -23,11 +23,13 @@ Autenticación (configurable):
 from __future__ import annotations
 
 import abc
+import time
+import unicodedata
 
 import httpx
 
 from .config import get_settings
-from .models import Order, OrderLine
+from .models import Order, OrderLine, Price, PurchaseRequest, Quote
 
 
 class ERPClient(abc.ABC):
@@ -38,6 +40,26 @@ class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def list_orders_by_phone(self, phone: str) -> list[Order]:
         """Lista las órdenes asociadas a un número de teléfono."""
+
+    @abc.abstractmethod
+    async def get_price(self, producto: str) -> Price | None:
+        """Devuelve el precio vigente de un producto, o None si no existe."""
+
+    @abc.abstractmethod
+    async def list_prices(self) -> list[Price]:
+        """Lista los precios vigentes."""
+
+    @abc.abstractmethod
+    async def create_quote(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> Quote | None:
+        """Crea una cotización. Devuelve None si el producto no tiene precio."""
+
+    @abc.abstractmethod
+    async def create_request(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> PurchaseRequest:
+        """Registra una solicitud de pedido (estado 'pendiente')."""
 
 
 class HTTPERPClient(ERPClient):
@@ -81,6 +103,73 @@ class HTTPERPClient(ERPClient):
             resp.raise_for_status()
             return [Order(**item) for item in resp.json()]
 
+    async def get_price(self, producto: str) -> Price | None:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/precios/{producto}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return Price(**resp.json())
+
+    async def list_prices(self) -> list[Price]:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/precios")
+            resp.raise_for_status()
+            return [Price(**item) for item in resp.json()]
+
+    async def create_quote(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> Quote | None:
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/cotizaciones",
+                json={"producto": producto, "cantidad": cantidad_ton, "telefono": telefono},
+            )
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return Quote(**resp.json())
+
+    async def create_request(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> PurchaseRequest:
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/solicitudes",
+                json={"producto": producto, "cantidad": cantidad_ton, "telefono": telefono},
+            )
+            resp.raise_for_status()
+            return PurchaseRequest(**resp.json())
+
+
+# Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
+_MOCK_PRECIOS = {
+    "maiz amarillo": {"precio_ton": 5200.0, "disponible_ton": 1200.0},
+    "maiz blanco": {"precio_ton": 5450.0, "disponible_ton": 800.0},
+    "trigo": {"precio_ton": 7100.0, "disponible_ton": 600.0},
+    "sorgo": {"precio_ton": 4800.0, "disponible_ton": 900.0},
+    "soya": {"precio_ton": 11500.0, "disponible_ton": 400.0},
+}
+_MOCK_VIGENCIA = "fin del día hábil"
+
+
+def _normalize(text: str) -> str:
+    """Minúsculas sin acentos, para emparejar nombres de producto."""
+    text = text.strip().lower()
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
+    )
+
+
+def _match_precio(producto: str) -> tuple[str, dict] | None:
+    key = _normalize(producto)
+    if key in _MOCK_PRECIOS:
+        return key, _MOCK_PRECIOS[key]
+    for nombre, data in _MOCK_PRECIOS.items():
+        if key in nombre or nombre in key:
+            return nombre, data
+    return None
+
 
 class MockERPClient(ERPClient):
     """Datos de ejemplo en memoria para desarrollo local, alineados al dominio
@@ -120,6 +209,60 @@ class MockERPClient(ERPClient):
 
     async def list_orders_by_phone(self, phone: str) -> list[Order]:
         return [o for o in self._orders.values() if o.telefono == phone]
+
+    async def get_price(self, producto: str) -> Price | None:
+        match = _match_precio(producto)
+        if match is None:
+            return None
+        nombre, data = match
+        return Price(
+            producto=nombre,
+            precio_ton=data["precio_ton"],
+            moneda="MXN",
+            disponible_ton=data["disponible_ton"],
+            vigencia=_MOCK_VIGENCIA,
+        )
+
+    async def list_prices(self) -> list[Price]:
+        return [
+            Price(
+                producto=nombre,
+                precio_ton=data["precio_ton"],
+                moneda="MXN",
+                disponible_ton=data["disponible_ton"],
+                vigencia=_MOCK_VIGENCIA,
+            )
+            for nombre, data in _MOCK_PRECIOS.items()
+        ]
+
+    async def create_quote(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> Quote | None:
+        match = _match_precio(producto)
+        if match is None:
+            return None
+        nombre, data = match
+        cantidad = float(cantidad_ton)
+        return Quote(
+            id=f"COT-{int(time.time())}",
+            producto=nombre,
+            cantidad=cantidad,
+            total=round(data["precio_ton"] * cantidad, 2),
+            moneda="MXN",
+            vigencia=_MOCK_VIGENCIA,
+            estado="borrador",
+        )
+
+    async def create_request(
+        self, producto: str, cantidad_ton: float, telefono: str
+    ) -> PurchaseRequest:
+        return PurchaseRequest(
+            id=f"SOL-{int(time.time())}",
+            producto=producto,
+            cantidad=float(cantidad_ton),
+            telefono=telefono,
+            estado="pendiente",
+        )
 
 
 def get_erp_client() -> ERPClient:

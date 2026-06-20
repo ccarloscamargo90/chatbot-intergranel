@@ -1,31 +1,19 @@
 """Agente de Ventas: precios, cotizaciones, contratos y pedidos.
 
-Funcional con precios simulados (PRECIOS_MOCK). En la Fase 2 estos se
-reemplazarán por llamadas HTTP al ERP. Las cotizaciones y solicitudes se
-publican en el bus de eventos para que otros agentes puedan consultarlas.
+Los precios, cotizaciones y solicitudes provienen del ERP (vía `ERPClient`):
+con `ERP_BASE_URL` configurado se consultan por HTTP; en desarrollo se usa el
+ERP simulado. Las cotizaciones y solicitudes se publican además en el bus de
+eventos para que otros agentes puedan consultarlas.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
-import unicodedata
 
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
-
-# Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
-PRECIOS_MOCK = {
-    "maiz amarillo": {"precio_ton": 5200.0, "disponible_ton": 1200.0},
-    "maiz blanco": {"precio_ton": 5450.0, "disponible_ton": 800.0},
-    "trigo": {"precio_ton": 7100.0, "disponible_ton": 600.0},
-    "sorgo": {"precio_ton": 4800.0, "disponible_ton": 900.0},
-    "soya": {"precio_ton": 11500.0, "disponible_ton": 400.0},
-}
-MONEDA = "MXN"
-VIGENCIA = "fin del día hábil"
 
 SYSTEM_PROMPT = """\
 Eres el agente de Ventas de Intergranel, comercializadora de granos a granel \
@@ -139,25 +127,6 @@ TOOLS = [
 ]
 
 
-def _normalize(text: str) -> str:
-    """Minúsculas sin acentos, para emparejar nombres de producto."""
-    text = text.strip().lower()
-    return "".join(
-        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
-    )
-
-
-def _lookup_precio(producto: str) -> tuple[str, dict] | None:
-    key = _normalize(producto)
-    if key in PRECIOS_MOCK:
-        return key, PRECIOS_MOCK[key]
-    # Coincidencia parcial (p. ej. "maíz" -> "maiz amarillo").
-    for name, data in PRECIOS_MOCK.items():
-        if key in name or name in key:
-            return name, data
-    return None
-
-
 class VentasAgent(BaseAgent):
     name = "ventas"
 
@@ -170,49 +139,31 @@ class VentasAgent(BaseAgent):
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
         try:
             if name == "consultar_precio":
-                match = _lookup_precio(tool_input["producto"])
-                if match is None:
+                price = await self._erp.get_price(tool_input["producto"])
+                if price is None:
                     return json.dumps(
                         {"encontrado": False, "producto": tool_input["producto"]},
                         ensure_ascii=False,
                     )
-                prod, data = match
                 return json.dumps(
-                    {
-                        "encontrado": True,
-                        "producto": prod,
-                        "precio_ton": data["precio_ton"],
-                        "moneda": MONEDA,
-                        "disponible_ton": data["disponible_ton"],
-                        "vigencia": VIGENCIA,
-                    },
+                    {"encontrado": True, **price.model_dump()},
                     ensure_ascii=False,
                 )
 
             if name == "generar_cotizacion":
-                match = _lookup_precio(tool_input["producto"])
-                if match is None:
+                quote = await self._erp.create_quote(
+                    tool_input["producto"], float(tool_input["cantidad_ton"]), caller_phone
+                )
+                if quote is None:
                     return json.dumps(
                         {"encontrado": False, "producto": tool_input["producto"]},
                         ensure_ascii=False,
                     )
-                prod, data = match
-                cantidad = float(tool_input["cantidad_ton"])
-                total = round(data["precio_ton"] * cantidad, 2)
-                cotizacion = {
-                    "id": f"COT-{int(time.time())}",
-                    "producto": prod,
-                    "cantidad_ton": cantidad,
-                    "precio_ton": data["precio_ton"],
-                    "total": total,
-                    "moneda": MONEDA,
-                    "vigencia": VIGENCIA,
-                    "estado": "borrador",
-                }
+                data = quote.model_dump()
                 await self._bus.publish(
-                    f"bus:ventas:cotizacion:{caller_phone}", cotizacion, ttl=86400
+                    f"bus:ventas:cotizacion:{caller_phone}", data, ttl=86400
                 )
-                return json.dumps(cotizacion, ensure_ascii=False)
+                return json.dumps(data, ensure_ascii=False)
 
             if name == "consultar_contrato":
                 order = await self._erp.get_order(tool_input["folio"])
@@ -238,17 +189,14 @@ class VentasAgent(BaseAgent):
                 )
 
             if name == "solicitar_pedido":
-                solicitud = {
-                    "id": f"SOL-{int(time.time())}",
-                    "producto": tool_input["producto"],
-                    "cantidad_ton": float(tool_input["cantidad_ton"]),
-                    "telefono": caller_phone,
-                    "estado": "pendiente",
-                }
-                await self._bus.publish(
-                    f"bus:ventas:solicitud:{caller_phone}", solicitud, ttl=86400
+                solicitud = await self._erp.create_request(
+                    tool_input["producto"], float(tool_input["cantidad_ton"]), caller_phone
                 )
-                return json.dumps(solicitud, ensure_ascii=False)
+                data = solicitud.model_dump()
+                await self._bus.publish(
+                    f"bus:ventas:solicitud:{caller_phone}", data, ttl=86400
+                )
+                return json.dumps(data, ensure_ascii=False)
 
             if name == "transferir_a_soporte":
                 motivo = tool_input.get("motivo", "(sin especificar)")

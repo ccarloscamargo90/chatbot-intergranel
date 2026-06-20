@@ -28,6 +28,38 @@ class Order(BaseModel):
     notas: str | None = None
 
 
+class Price(BaseModel):
+    """Precio vigente de un producto tal como lo expone el ERP."""
+
+    producto: str
+    precio_ton: float
+    moneda: str = "MXN"
+    disponible_ton: float | None = None
+    vigencia: str | None = None
+
+
+class Quote(BaseModel):
+    """Cotización generada por el ERP a partir de producto y cantidad."""
+
+    id: str
+    producto: str
+    cantidad: float
+    total: float
+    moneda: str = "MXN"
+    vigencia: str | None = None
+    estado: str = "borrador"
+
+
+class PurchaseRequest(BaseModel):
+    """Solicitud de pedido registrada en el ERP."""
+
+    id: str
+    producto: str
+    cantidad: float
+    telefono: str | None = None
+    estado: str = "pendiente"
+
+
 class OrderEvent(BaseModel):
     """Payload que el ERP envía a /webhooks/erp/order-update para disparar
     una notificación proactiva al cliente por WhatsApp."""
