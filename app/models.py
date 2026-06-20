@@ -60,6 +60,30 @@ class PurchaseRequest(BaseModel):
     estado: str = "pendiente"
 
 
+class PurchaseOrder(BaseModel):
+    """Orden de compra a un proveedor (folio OC-YYYY-NNNN)."""
+
+    id: str
+    proveedor: str
+    producto: str
+    cantidad: float
+    unidad: str = "ton"
+    total: float | None = None
+    moneda: str = "MXN"
+    estado: str = "pendiente"  # pendiente | aprobada | rechazada | recibida
+    fecha: str | None = None
+    fecha_entrega_estimada: str | None = None
+
+
+class Supplier(BaseModel):
+    """Proveedor registrado en el ERP."""
+
+    id: str
+    nombre: str
+    productos: list[str] = Field(default_factory=list)
+    contacto: str | None = None
+
+
 class OrderEvent(BaseModel):
     """Payload que el ERP envía a /webhooks/erp/order-update para disparar
     una notificación proactiva al cliente por WhatsApp."""

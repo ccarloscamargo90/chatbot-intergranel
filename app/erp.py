@@ -29,7 +29,15 @@ import unicodedata
 import httpx
 
 from .config import get_settings
-from .models import Order, OrderLine, Price, PurchaseRequest, Quote
+from .models import (
+    Order,
+    OrderLine,
+    Price,
+    PurchaseOrder,
+    PurchaseRequest,
+    Quote,
+    Supplier,
+)
 
 
 class ERPClient(abc.ABC):
@@ -60,6 +68,29 @@ class ERPClient(abc.ABC):
         self, producto: str, cantidad_ton: float, telefono: str
     ) -> PurchaseRequest:
         """Registra una solicitud de pedido (estado 'pendiente')."""
+
+    # --- Compras (órdenes de compra a proveedores) ------------------------- #
+    @abc.abstractmethod
+    async def get_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        """Devuelve una orden de compra por su folio, o None si no existe."""
+
+    @abc.abstractmethod
+    async def list_pending_purchase_orders(self) -> list[PurchaseOrder]:
+        """Lista las órdenes de compra pendientes de aprobación."""
+
+    @abc.abstractmethod
+    async def create_purchase_order(
+        self, proveedor: str, producto: str, cantidad_ton: float
+    ) -> PurchaseOrder:
+        """Crea una orden de compra (estado 'pendiente')."""
+
+    @abc.abstractmethod
+    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        """Aprueba una orden de compra. Devuelve None si no existe."""
+
+    @abc.abstractmethod
+    async def list_suppliers(self) -> list[Supplier]:
+        """Lista los proveedores registrados."""
 
 
 class HTTPERPClient(ERPClient):
@@ -141,6 +172,51 @@ class HTTPERPClient(ERPClient):
             resp.raise_for_status()
             return PurchaseRequest(**resp.json())
 
+    async def get_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/oc/{folio}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return PurchaseOrder(**resp.json())
+
+    async def list_pending_purchase_orders(self) -> list[PurchaseOrder]:
+        async with self._client() as client:
+            resp = await client.get(
+                f"{self._base_url}/bot/oc", params={"estado": "pendiente"}
+            )
+            resp.raise_for_status()
+            return [PurchaseOrder(**item) for item in resp.json()]
+
+    async def create_purchase_order(
+        self, proveedor: str, producto: str, cantidad_ton: float
+    ) -> PurchaseOrder:
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/oc",
+                json={
+                    "proveedor": proveedor,
+                    "producto": producto,
+                    "cantidad": cantidad_ton,
+                },
+            )
+            resp.raise_for_status()
+            return PurchaseOrder(**resp.json())
+
+    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        async with self._client() as client:
+            resp = await client.patch(f"{self._base_url}/bot/oc/{folio}/aprobar")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return PurchaseOrder(**resp.json())
+
+    async def list_suppliers(self) -> list[Supplier]:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/proveedores")
+            resp.raise_for_status()
+            return [Supplier(**item) for item in resp.json()]
+
 
 # Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
 _MOCK_PRECIOS = {
@@ -203,6 +279,44 @@ class MockERPClient(ERPClient):
                 lineas=[OrderLine(producto="Trigo cristalino", cantidad=30, unidad="ton")],
             ),
         }
+        self._purchase_orders: dict[str, PurchaseOrder] = {
+            "OC-2026-0001": PurchaseOrder(
+                id="OC-2026-0001",
+                proveedor="Granos del Norte S.A.",
+                producto="Maíz amarillo",
+                cantidad=100.0,
+                total=510000.0,
+                moneda="MXN",
+                estado="pendiente",
+                fecha="2026-06-01",
+                fecha_entrega_estimada="2026-06-15",
+            ),
+            "OC-2026-0002": PurchaseOrder(
+                id="OC-2026-0002",
+                proveedor="Agrícola del Pacífico",
+                producto="Sorgo",
+                cantidad=80.0,
+                total=380000.0,
+                moneda="MXN",
+                estado="aprobada",
+                fecha="2026-05-28",
+                fecha_entrega_estimada="2026-06-10",
+            ),
+        }
+        self._suppliers: list[Supplier] = [
+            Supplier(
+                id="PROV-001",
+                nombre="Granos del Norte S.A.",
+                productos=["Maíz amarillo", "Maíz blanco"],
+                contacto="ventas@granosdelnorte.mx",
+            ),
+            Supplier(
+                id="PROV-002",
+                nombre="Agrícola del Pacífico",
+                productos=["Sorgo", "Trigo"],
+                contacto="contacto@agripacifico.mx",
+            ),
+        ]
 
     async def get_order(self, order_id: str) -> Order | None:
         return self._orders.get(order_id.strip().upper())
@@ -263,6 +377,38 @@ class MockERPClient(ERPClient):
             telefono=telefono,
             estado="pendiente",
         )
+
+    async def get_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        return self._purchase_orders.get(folio.strip().upper())
+
+    async def list_pending_purchase_orders(self) -> list[PurchaseOrder]:
+        return [
+            oc for oc in self._purchase_orders.values() if oc.estado == "pendiente"
+        ]
+
+    async def create_purchase_order(
+        self, proveedor: str, producto: str, cantidad_ton: float
+    ) -> PurchaseOrder:
+        folio = f"OC-{int(time.time())}"
+        oc = PurchaseOrder(
+            id=folio,
+            proveedor=proveedor,
+            producto=producto,
+            cantidad=float(cantidad_ton),
+            estado="pendiente",
+        )
+        self._purchase_orders[folio] = oc
+        return oc
+
+    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
+        oc = self._purchase_orders.get(folio.strip().upper())
+        if oc is None:
+            return None
+        oc.estado = "aprobada"
+        return oc
+
+    async def list_suppliers(self) -> list[Supplier]:
+        return list(self._suppliers)
 
 
 def get_erp_client() -> ERPClient:

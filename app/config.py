@@ -56,9 +56,19 @@ class Settings(BaseSettings):
     # --- Identidad ---
     company_name: str = "Intergranel"
 
+    # --- Agente de Compras ---
+    # Lista blanca de teléfonos autorizados a usar el agente de Compras, en
+    # formato internacional sin '+', separados por comas. Si se deja vacía, no
+    # se aplica restricción (modo desarrollo).
+    compras_phones_allowed: str = ""
+
     @property
     def use_mock_erp(self) -> bool:
         return not self.erp_base_url
+
+    @property
+    def compras_allowed_set(self) -> set[str]:
+        return {p.strip() for p in self.compras_phones_allowed.split(",") if p.strip()}
 
 
 @lru_cache
