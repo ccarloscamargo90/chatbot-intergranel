@@ -7,6 +7,7 @@ import pytest
 
 from app.agents.inventario import InventarioAgent
 from app.bus import InMemoryEventBus
+from app.erp import MockERPClient
 
 PHONE = "5215512345678"
 
@@ -14,6 +15,7 @@ PHONE = "5215512345678"
 @pytest.fixture
 def inventario() -> InventarioAgent:
     a = InventarioAgent.__new__(InventarioAgent)
+    a._erp = MockERPClient()
     a._bus = InMemoryEventBus()
     return a
 

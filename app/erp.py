@@ -30,6 +30,7 @@ import httpx
 
 from .config import get_settings
 from .models import (
+    InventoryItem,
     Order,
     OrderLine,
     Price,
@@ -91,6 +92,15 @@ class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def list_suppliers(self) -> list[Supplier]:
         """Lista los proveedores registrados."""
+
+    # --- Inventario -------------------------------------------------------- #
+    @abc.abstractmethod
+    async def get_inventory_item(self, producto: str) -> InventoryItem | None:
+        """Devuelve la existencia de un producto, o None si no existe."""
+
+    @abc.abstractmethod
+    async def list_inventory(self) -> list[InventoryItem]:
+        """Lista todas las existencias en inventario."""
 
 
 class HTTPERPClient(ERPClient):
@@ -217,6 +227,20 @@ class HTTPERPClient(ERPClient):
             resp.raise_for_status()
             return [Supplier(**item) for item in resp.json()]
 
+    async def get_inventory_item(self, producto: str) -> InventoryItem | None:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/inventario/{producto}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return InventoryItem(**resp.json())
+
+    async def list_inventory(self) -> list[InventoryItem]:
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/bot/inventario")
+            resp.raise_for_status()
+            return [InventoryItem(**item) for item in resp.json()]
+
 
 # Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
 _MOCK_PRECIOS = {
@@ -227,6 +251,26 @@ _MOCK_PRECIOS = {
     "soya": {"precio_ton": 11500.0, "disponible_ton": 400.0},
 }
 _MOCK_VIGENCIA = "fin del día hábil"
+
+# Stock simulado por producto (toneladas) con su umbral mínimo y ubicación.
+_MOCK_INVENTARIO = {
+    "trigo cristalino": {"stock_ton": 200.0, "umbral_ton": 250.0, "ubicacion": "Silo Querétaro"},
+    "soya": {"stock_ton": 150.0, "umbral_ton": 200.0, "ubicacion": "Silo Veracruz"},
+    "maiz amarillo": {"stock_ton": 850.0, "umbral_ton": 300.0, "ubicacion": "Silo Bajío"},
+    "maiz blanco": {"stock_ton": 520.0, "umbral_ton": 250.0, "ubicacion": "Silo Bajío"},
+    "sorgo": {"stock_ton": 640.0, "umbral_ton": 200.0, "ubicacion": "Silo Sinaloa"},
+}
+
+
+def _inventory_item(nombre: str, data: dict) -> InventoryItem:
+    estado = "bajo_umbral" if data["stock_ton"] < data["umbral_ton"] else "normal"
+    return InventoryItem(
+        producto=nombre,
+        stock_ton=data["stock_ton"],
+        umbral_ton=data["umbral_ton"],
+        ubicacion=data["ubicacion"],
+        estado=estado,
+    )
 
 
 def _normalize(text: str) -> str:
@@ -409,6 +453,18 @@ class MockERPClient(ERPClient):
 
     async def list_suppliers(self) -> list[Supplier]:
         return list(self._suppliers)
+
+    async def get_inventory_item(self, producto: str) -> InventoryItem | None:
+        key = _normalize(producto)
+        if key in _MOCK_INVENTARIO:
+            return _inventory_item(key, _MOCK_INVENTARIO[key])
+        for nombre, data in _MOCK_INVENTARIO.items():
+            if key in nombre or nombre in key:
+                return _inventory_item(nombre, data)
+        return None
+
+    async def list_inventory(self) -> list[InventoryItem]:
+        return [_inventory_item(n, d) for n, d in _MOCK_INVENTARIO.items()]
 
 
 def get_erp_client() -> ERPClient:

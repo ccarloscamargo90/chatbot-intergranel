@@ -84,6 +84,28 @@ class Supplier(BaseModel):
     contacto: str | None = None
 
 
+class InventoryItem(BaseModel):
+    """Existencia de un producto en inventario tal como la expone el ERP."""
+
+    producto: str
+    stock_ton: float
+    umbral_ton: float
+    ubicacion: str | None = None
+    estado: str = "normal"  # normal | bajo_umbral
+
+
+class InventoryAlertEvent(BaseModel):
+    """Payload que el ERP envía a /webhooks/erp/inventory-alert cuando un
+    producto cae por debajo de su umbral."""
+
+    producto: str
+    stock_ton: float
+    umbral_ton: float
+    ubicacion: str | None = None
+    # Texto opcional para sobrescribir el mensaje generado automáticamente.
+    mensaje: str | None = None
+
+
 class OrderEvent(BaseModel):
     """Payload que el ERP envía a /webhooks/erp/order-update para disparar
     una notificación proactiva al cliente por WhatsApp."""

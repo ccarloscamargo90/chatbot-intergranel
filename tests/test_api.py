@@ -75,3 +75,59 @@ def test_order_update_rejects_bad_secret(monkeypatch):
         },
     )
     assert resp.status_code == 401
+
+
+def test_inventory_alert_sin_destinatarios(monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.settings, "inventory_alert_phones", "")
+    resp = client.post(
+        "/webhooks/erp/inventory-alert",
+        json={"producto": "trigo cristalino", "stock_ton": 200, "umbral_ton": 250},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["result"]["sent"] == 0
+
+
+def test_inventory_alert_notifica_al_equipo(monkeypatch):
+    import asyncio
+
+    from app import main
+    from app.bus import get_event_bus
+
+    enviados = []
+
+    async def fake_send_text(to, text):
+        enviados.append((to, text))
+        return {}
+
+    monkeypatch.setattr(main.settings, "inventory_alert_phones", "5210000000001,5210000000002")
+    monkeypatch.setattr(main.wa, "send_text", fake_send_text)
+
+    resp = client.post(
+        "/webhooks/erp/inventory-alert",
+        json={
+            "producto": "soya",
+            "stock_ton": 150,
+            "umbral_ton": 200,
+            "ubicacion": "Silo Veracruz",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["result"]["sent"] == 2
+    assert len(enviados) == 2
+    # La alerta se publicó en el bus.
+    evento = asyncio.run(get_event_bus().read("bus:inventario:alerta:soya"))
+    assert evento is not None and evento["producto"] == "soya"
+
+
+def test_inventory_alert_rejects_bad_secret(monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.settings, "erp_webhook_secret", "secreto")
+    resp = client.post(
+        "/webhooks/erp/inventory-alert",
+        headers={"X-Webhook-Secret": "incorrecto"},
+        json={"producto": "trigo", "stock_ton": 10, "umbral_ton": 50},
+    )
+    assert resp.status_code == 401

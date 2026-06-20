@@ -107,6 +107,33 @@ def test_list_suppliers_mock():
     assert len(proveedores) == 2
 
 
+def test_get_inventory_item_mock_bajo_umbral():
+    erp = MockERPClient()
+    item = asyncio.run(erp.get_inventory_item("trigo cristalino"))
+    assert item is not None
+    assert item.estado == "bajo_umbral"
+
+
+def test_get_inventory_item_mock_normal():
+    erp = MockERPClient()
+    item = asyncio.run(erp.get_inventory_item("maíz amarillo"))
+    assert item is not None
+    assert item.estado == "normal"
+
+
+def test_get_inventory_item_mock_inexistente():
+    erp = MockERPClient()
+    assert asyncio.run(erp.get_inventory_item("avena")) is None
+
+
+def test_list_inventory_mock():
+    erp = MockERPClient()
+    items = asyncio.run(erp.list_inventory())
+    assert len(items) == 5
+    bajo = [i.producto for i in items if i.estado == "bajo_umbral"]
+    assert set(bajo) == {"trigo cristalino", "soya"}
+
+
 # ----------------------------- HTTPERPClient ----------------------------- #
 def test_auth_headers_api_key_header():
     c = HTTPERPClient("https://erp/api/v1", api_key="secret", api_key_header="X-Bot-Api-Key")
@@ -328,3 +355,43 @@ def test_list_suppliers_http_ok():
 
     proveedores = asyncio.run(_make_client(handler).list_suppliers())
     assert proveedores[0].nombre == "Granos del Norte"
+
+
+def test_get_inventory_item_http_ok():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/bot/inventario/trigo"
+        return httpx.Response(
+            200,
+            json={
+                "producto": "trigo",
+                "stock_ton": 100.0,
+                "umbral_ton": 250.0,
+                "estado": "bajo_umbral",
+            },
+        )
+
+    item = asyncio.run(_make_client(handler).get_inventory_item("trigo"))
+    assert item is not None
+    assert item.estado == "bajo_umbral"
+
+
+def test_get_inventory_item_http_404():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "no existe"})
+
+    assert asyncio.run(_make_client(handler).get_inventory_item("avena")) is None
+
+
+def test_list_inventory_http_ok():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/bot/inventario"
+        return httpx.Response(
+            200,
+            json=[
+                {"producto": "trigo", "stock_ton": 100.0, "umbral_ton": 250.0},
+                {"producto": "soya", "stock_ton": 300.0, "umbral_ton": 200.0},
+            ],
+        )
+
+    items = asyncio.run(_make_client(handler).list_inventory())
+    assert [i.producto for i in items] == ["trigo", "soya"]
