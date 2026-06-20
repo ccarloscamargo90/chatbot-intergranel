@@ -26,8 +26,8 @@ app/
   bus.py               ← Bus de eventos compartido (Redis / InMemory)
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
-    ventas.py           ← Funcional, tools con precios mock
-    compras.py          ← Stub (tools devuelven "próximamente")
+    ventas.py           ← Funcional, precios/cotizaciones vía ERP
+    compras.py          ← Funcional vía ERP, con lista blanca de teléfonos
     inventario.py       ← Funcional con stock mock
     soporte.py          ← Migrado del asistente original
   assistant.py          ← Wrapper compat para tests legacy
@@ -103,7 +103,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 97 tests pasando
+pytest -q                  # 113 tests pasando
 ```
 
 ## Estado actual y fases
@@ -123,10 +123,20 @@ Endpoints que el ERP (NestJS) debe exponer:
 - `POST /api/v1/bot/cotizaciones` (body `{ producto, cantidad, telefono }`) → `{ id, producto, cantidad, total, vigencia, estado }`
 - `POST /api/v1/bot/solicitudes` (body `{ producto, cantidad, telefono }`) → `{ id, estado: "pendiente" }`
 
-### Fase 3 — Agente de Compras completo
-Implementar tools reales: consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores.
-Agregar lista blanca de teléfonos autorizados (config: COMPRAS_PHONES_ALLOWED).
-Endpoints ERP: GET/POST /api/v1/bot/oc/, PATCH /api/v1/bot/oc/:folio/aprobar, GET /api/v1/bot/proveedores.
+### Fase 3 ✅ — Agente de Compras completo
+Completada. `agents/compras.py` implementa tools reales contra el ERP
+(consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores)
+con lista blanca de teléfonos (`COMPRAS_PHONES_ALLOWED`; vacía = sin
+restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
+Se extendió `ERPClient` con `get_purchase_order`, `list_pending_purchase_orders`,
+`create_purchase_order`, `approve_purchase_order`, `list_suppliers` y se
+añadieron los modelos `PurchaseOrder` y `Supplier`.
+Endpoints que el ERP (NestJS) debe exponer:
+- `GET /api/v1/bot/oc/:folio` → PurchaseOrder | 404
+- `GET /api/v1/bot/oc?estado=pendiente` → lista de OC pendientes
+- `POST /api/v1/bot/oc` (body `{ proveedor, producto, cantidad }`) → PurchaseOrder
+- `PATCH /api/v1/bot/oc/:folio/aprobar` → PurchaseOrder (estado aprobada)
+- `GET /api/v1/bot/proveedores` → lista de Supplier
 
 ### Fase 4 — Inventario + alertas proactivas
 Conectar agents/inventario.py al ERP real (GET /api/v1/bot/inventario/).
@@ -156,11 +166,19 @@ Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,4
 | listar_ordenes_cliente | — | Órdenes del remitente |
 | escalar_a_humano | motivo | Log + mensaje de escalamiento |
 
-### Compras (agents/compras.py) — Stub (Fase 3)
+### Compras (agents/compras.py) — Funcional vía ERP (mock o HTTP)
 
-Tools actuales devuelven "próximamente". transferir_a_ventas funciona.
-Planificadas: consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores.
-Requiere lista blanca de teléfonos.
+| Tool | Params requeridos | Qué hace |
+|---|---|---|
+| consultar_oc | folio | Estado y detalles de una OC (ERP) |
+| listar_oc_pendientes | — | OC pendientes de aprobación (ERP) |
+| crear_oc | proveedor, producto, cantidad_ton | Crea una OC (ERP) |
+| aprobar_oc | folio | Aprueba una OC (ERP) |
+| listar_proveedores | — | Proveedores registrados (ERP) |
+| transferir_a_ventas | motivo | Cambia agente activo en bus |
+
+Acceso restringido por lista blanca `COMPRAS_PHONES_ALLOWED` (vacía = sin
+restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
 
 ### Inventario (agents/inventario.py) — Funcional con mock
 
@@ -179,6 +197,12 @@ Contratos en MockERPClient (teléfono 5215512345678):
 - CONT-2026-0001: Molinos del Bajío, maíz amarillo 50ton, $185,000, EN_PROCESO / EN_TRANSITO
 - CONT-2026-0002: Molinos del Bajío, trigo cristalino 30ton, $92,000, ACTIVO
 
+Órdenes de compra (OC) en MockERPClient:
+- OC-2026-0001: Granos del Norte, maíz amarillo 100ton, $510,000, pendiente
+- OC-2026-0002: Agrícola del Pacífico, sorgo 80ton, $380,000, aprobada
+
+Proveedores: PROV-001 Granos del Norte (maíz), PROV-002 Agrícola del Pacífico (sorgo, trigo).
+
 ## Variables de entorno
 
 ```
@@ -187,4 +211,5 @@ WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SE
 ERP_BASE_URL (vacío = mock), ERP_API_KEY, ERP_API_KEY_HEADER (default: X-Bot-Api-Key)
 ERP_WEBHOOK_SECRET
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
+COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
 ```
