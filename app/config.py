@@ -56,9 +56,29 @@ class Settings(BaseSettings):
     # --- Identidad ---
     company_name: str = "Intergranel"
 
+    # --- Agente de Compras ---
+    # Lista blanca de teléfonos autorizados a usar el agente de Compras, en
+    # formato internacional sin '+', separados por comas. Si se deja vacía, no
+    # se aplica restricción (modo desarrollo).
+    compras_phones_allowed: str = ""
+
+    # --- Alertas de inventario ---
+    # Teléfonos del equipo que reciben las alertas proactivas de inventario,
+    # en formato internacional sin '+', separados por comas. Si se deja vacía,
+    # las alertas solo se registran en el bus y el log (no se envían por WhatsApp).
+    inventory_alert_phones: str = ""
+
     @property
     def use_mock_erp(self) -> bool:
         return not self.erp_base_url
+
+    @property
+    def compras_allowed_set(self) -> set[str]:
+        return {p.strip() for p in self.compras_phones_allowed.split(",") if p.strip()}
+
+    @property
+    def inventory_alert_list(self) -> list[str]:
+        return [p.strip() for p in self.inventory_alert_phones.split(",") if p.strip()]
 
 
 @lru_cache

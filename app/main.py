@@ -8,11 +8,12 @@ import logging
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 
-from .assistant import Assistant
+from .bus import get_event_bus
 from .config import get_settings
 from .dedup import get_dedup_store
-from .models import OrderEvent
-from .notifications import notify_order_event
+from .models import InventoryAlertEvent, OrderEvent
+from .notifications import notify_inventory_alert, notify_order_event
+from .router import Router
 from .whatsapp import WhatsAppClient, verify_signature
 
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +23,7 @@ settings = get_settings()
 app = FastAPI(title="Intergranel · Asistente de WhatsApp")
 
 wa = WhatsAppClient()
-assistant = Assistant()
+router = Router()
 dedup = get_dedup_store()
 
 
@@ -136,7 +137,7 @@ async def _process_message(message: dict) -> None:
         mtype = message.get("type")
         if mtype == "text":
             text = message["text"]["body"]
-            reply = await assistant.handle(phone, text)
+            reply = await router.route(phone, text)
             await wa.send_text(phone, reply)
             return
 
@@ -150,7 +151,7 @@ async def _process_message(message: dict) -> None:
                 )
                 return
             content, store_text = built
-            reply = await assistant.handle(phone, content, store_text)
+            reply = await router.route(phone, content, store_text)
             await wa.send_text(phone, reply)
             return
 
@@ -182,4 +183,26 @@ async def erp_order_update(
     if settings.erp_webhook_secret and x_webhook_secret != settings.erp_webhook_secret:
         raise HTTPException(status_code=401, detail="Secreto inválido")
     result = await notify_order_event(wa, event)
+    return {"status": "sent", "result": result}
+
+
+# --------------------------------------------------------------------------- #
+# ERP: webhook de alerta de inventario -> notificación proactiva al equipo.
+# --------------------------------------------------------------------------- #
+@app.post("/webhooks/erp/inventory-alert")
+async def erp_inventory_alert(
+    event: InventoryAlertEvent,
+    x_webhook_secret: str = Header(default=""),
+) -> dict:
+    if settings.erp_webhook_secret and x_webhook_secret != settings.erp_webhook_secret:
+        raise HTTPException(status_code=401, detail="Secreto inválido")
+    # Publicamos la alerta en el bus para que el agente de Inventario y otros
+    # puedan consultarla, y notificamos al equipo por WhatsApp.
+    bus = get_event_bus()
+    await bus.publish(
+        f"bus:inventario:alerta:{event.producto}",
+        event.model_dump(),
+        ttl=60 * 60 * 24,
+    )
+    result = await notify_inventory_alert(wa, event)
     return {"status": "sent", "result": result}

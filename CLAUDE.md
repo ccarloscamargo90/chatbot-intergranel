@@ -26,9 +26,9 @@ app/
   bus.py               ← Bus de eventos compartido (Redis / InMemory)
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
-    ventas.py           ← Funcional, tools con precios mock
-    compras.py          ← Stub (tools devuelven "próximamente")
-    inventario.py       ← Funcional con stock mock
+    ventas.py           ← Funcional, precios/cotizaciones vía ERP
+    compras.py          ← Funcional vía ERP, con lista blanca de teléfonos
+    inventario.py       ← Funcional vía ERP, con alertas proactivas
     soporte.py          ← Migrado del asistente original
   assistant.py          ← Wrapper compat para tests legacy
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
@@ -103,7 +103,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 64 tests pasando
+pytest -q                  # 123 tests pasando
 ```
 
 ## Estado actual y fases
@@ -111,39 +111,60 @@ pytest -q                  # 64 tests pasando
 ### Fase 1 ✅ — Router + refactorización
 Completada. Router, bus, BaseAgent, 4 agentes (Soporte y Ventas funcionales, Compras e Inventario stubs).
 
-### Fase 2 — Agente de Ventas → ERP real
-Reemplazar PRECIOS_MOCK en agents/ventas.py por llamadas HTTP al ERP.
-Endpoints a implementar en el ERP (NestJS):
+### Fase 2 ✅ — Agente de Ventas → ERP real
+Completada. `agents/ventas.py` ya no tiene precios hardcodeados: consulta el ERP
+vía `ERPClient` (HTTP si hay `ERP_BASE_URL`, mock en desarrollo). Se extendió
+`ERPClient` con `get_price()`, `list_prices()`, `create_quote()`,
+`create_request()` (abstracto + `HTTPERPClient` + `MockERPClient`) y se
+añadieron los modelos `Price`, `Quote`, `PurchaseRequest`.
+Endpoints que el ERP (NestJS) debe exponer:
 - `GET /api/v1/bot/precios/:producto` → `{ producto, precio_ton, moneda, disponible_ton, vigencia }`
 - `GET /api/v1/bot/precios` → lista de precios vigentes
-- `POST /api/v1/bot/cotizaciones` → `{ id, producto, cantidad, total, vigencia, estado }`
-- `POST /api/v1/bot/solicitudes` → `{ id, estado: "pendiente" }`
-Extender ERPClient con: get_price(), list_prices(), create_quote(), create_request().
+- `POST /api/v1/bot/cotizaciones` (body `{ producto, cantidad, telefono }`) → `{ id, producto, cantidad, total, vigencia, estado }`
+- `POST /api/v1/bot/solicitudes` (body `{ producto, cantidad, telefono }`) → `{ id, estado: "pendiente" }`
 
-### Fase 3 — Agente de Compras completo
-Implementar tools reales: consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores.
-Agregar lista blanca de teléfonos autorizados (config: COMPRAS_PHONES_ALLOWED).
-Endpoints ERP: GET/POST /api/v1/bot/oc/, PATCH /api/v1/bot/oc/:folio/aprobar, GET /api/v1/bot/proveedores.
+### Fase 3 ✅ — Agente de Compras completo
+Completada. `agents/compras.py` implementa tools reales contra el ERP
+(consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores)
+con lista blanca de teléfonos (`COMPRAS_PHONES_ALLOWED`; vacía = sin
+restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
+Se extendió `ERPClient` con `get_purchase_order`, `list_pending_purchase_orders`,
+`create_purchase_order`, `approve_purchase_order`, `list_suppliers` y se
+añadieron los modelos `PurchaseOrder` y `Supplier`.
+Endpoints que el ERP (NestJS) debe exponer:
+- `GET /api/v1/bot/oc/:folio` → PurchaseOrder | 404
+- `GET /api/v1/bot/oc?estado=pendiente` → lista de OC pendientes
+- `POST /api/v1/bot/oc` (body `{ proveedor, producto, cantidad }`) → PurchaseOrder
+- `PATCH /api/v1/bot/oc/:folio/aprobar` → PurchaseOrder (estado aprobada)
+- `GET /api/v1/bot/proveedores` → lista de Supplier
 
-### Fase 4 — Inventario + alertas proactivas
-Conectar agents/inventario.py al ERP real (GET /api/v1/bot/inventario/).
-Nuevo webhook: POST /webhooks/erp/inventory-alert.
-Notificaciones proactivas al equipo cuando un producto cae bajo umbral.
+### Fase 4 ✅ — Inventario + alertas proactivas
+Completada. `agents/inventario.py` consulta el ERP vía `ERPClient`
+(`get_inventory_item`, `list_inventory`; HTTP si hay `ERP_BASE_URL`, mock en
+desarrollo) y se añadieron los modelos `InventoryItem` e `InventoryAlertEvent`.
+Nuevo webhook `POST /webhooks/erp/inventory-alert` (protegido por
+`ERP_WEBHOOK_SECRET`): publica la alerta en el bus
+(`bus:inventario:alerta:{producto}`) y notifica al equipo por WhatsApp
+(`notify_inventory_alert`, destinatarios en `INVENTORY_ALERT_PHONES`; vacío =
+solo log + bus).
+Endpoints que el ERP (NestJS) debe exponer:
+- `GET /api/v1/bot/inventario/:producto` → InventoryItem | 404
+- `GET /api/v1/bot/inventario` → lista de InventoryItem
 
 ## Especificación de agentes
 
-### Ventas (agents/ventas.py) — Funcional con mock
+### Ventas (agents/ventas.py) — Funcional vía ERP (mock o HTTP)
 
 | Tool | Params requeridos | Qué hace |
 |---|---|---|
-| consultar_precio | producto | Precio/ton, disponibilidad, vigencia |
-| generar_cotizacion | producto, cantidad_ton | Cotización con total. Publica en bus |
+| consultar_precio | producto | Precio/ton, disponibilidad, vigencia (ERP `get_price`) |
+| generar_cotizacion | producto, cantidad_ton | Cotización con total (ERP `create_quote`). Publica en bus |
 | consultar_contrato | folio | Estado de contrato (usa ERP) |
 | listar_contratos_cliente | — | Contratos del remitente (usa ERP) |
-| solicitar_pedido | producto, cantidad_ton | Registra solicitud. Publica en bus |
+| solicitar_pedido | producto, cantidad_ton | Registra solicitud (ERP `create_request`). Publica en bus |
 | transferir_a_soporte | motivo | Cambia agente activo en bus |
 
-Precios mock: maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
+Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
 
 ### Soporte (agents/soporte.py) — Funcional
 
@@ -153,28 +174,46 @@ Precios mock: maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorg
 | listar_ordenes_cliente | — | Órdenes del remitente |
 | escalar_a_humano | motivo | Log + mensaje de escalamiento |
 
-### Compras (agents/compras.py) — Stub (Fase 3)
-
-Tools actuales devuelven "próximamente". transferir_a_ventas funciona.
-Planificadas: consultar_oc, listar_oc_pendientes, crear_oc, aprobar_oc, listar_proveedores.
-Requiere lista blanca de teléfonos.
-
-### Inventario (agents/inventario.py) — Funcional con mock
+### Compras (agents/compras.py) — Funcional vía ERP (mock o HTTP)
 
 | Tool | Params requeridos | Qué hace |
 |---|---|---|
-| consultar_stock | producto | Stock, umbral, ubicación, estado |
-| listar_alertas_inventario | — | Productos bajo umbral |
-| resumen_inventario | — | Todos los productos |
+| consultar_oc | folio | Estado y detalles de una OC (ERP) |
+| listar_oc_pendientes | — | OC pendientes de aprobación (ERP) |
+| crear_oc | proveedor, producto, cantidad_ton | Crea una OC (ERP) |
+| aprobar_oc | folio | Aprueba una OC (ERP) |
+| listar_proveedores | — | Proveedores registrados (ERP) |
+| transferir_a_ventas | motivo | Cambia agente activo en bus |
+
+Acceso restringido por lista blanca `COMPRAS_PHONES_ALLOWED` (vacía = sin
+restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
+
+### Inventario (agents/inventario.py) — Funcional vía ERP (mock o HTTP)
+
+| Tool | Params requeridos | Qué hace |
+|---|---|---|
+| consultar_stock | producto | Stock, umbral, ubicación, estado (ERP `get_inventory_item`) |
+| listar_alertas_inventario | — | Productos bajo umbral (ERP `list_inventory`) |
+| resumen_inventario | — | Todos los productos (ERP `list_inventory`) |
 | transferir_a_ventas | motivo | Cambia agente activo |
 
-Stock mock: trigo cristalino (200 ton, umbral 250 → bajo_umbral), soya (150 ton, umbral 200 → bajo_umbral), resto normal.
+Alertas proactivas: el ERP llama a `POST /webhooks/erp/inventory-alert` cuando
+un producto cae bajo umbral; el webhook publica en el bus y notifica al equipo
+(`INVENTORY_ALERT_PHONES`).
+
+Stock del mock (`MockERPClient`): trigo cristalino (200 ton, umbral 250 → bajo_umbral), soya (150 ton, umbral 200 → bajo_umbral), resto normal.
 
 ## Datos del ERP mock
 
 Contratos en MockERPClient (teléfono 5215512345678):
 - CONT-2026-0001: Molinos del Bajío, maíz amarillo 50ton, $185,000, EN_PROCESO / EN_TRANSITO
 - CONT-2026-0002: Molinos del Bajío, trigo cristalino 30ton, $92,000, ACTIVO
+
+Órdenes de compra (OC) en MockERPClient:
+- OC-2026-0001: Granos del Norte, maíz amarillo 100ton, $510,000, pendiente
+- OC-2026-0002: Agrícola del Pacífico, sorgo 80ton, $380,000, aprobada
+
+Proveedores: PROV-001 Granos del Norte (maíz), PROV-002 Agrícola del Pacífico (sorgo, trigo).
 
 ## Variables de entorno
 
@@ -184,4 +223,6 @@ WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SE
 ERP_BASE_URL (vacío = mock), ERP_API_KEY, ERP_API_KEY_HEADER (default: X-Bot-Api-Key)
 ERP_WEBHOOK_SECRET
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
+COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
+INVENTORY_ALERT_PHONES (vacío = solo log+bus; lista separada por comas)
 ```

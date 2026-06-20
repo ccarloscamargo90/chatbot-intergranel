@@ -36,15 +36,15 @@ def test_process_message_ignora_duplicados(monkeypatch):
     handled: list = []
     sent: list = []
 
-    async def fake_handle(phone, text):
-        handled.append((phone, text))
+    async def fake_route(phone, content, store_text=None):
+        handled.append((phone, content))
         return "ok"
 
     async def fake_send_text(to, text):
         sent.append((to, text))
         return {}
 
-    monkeypatch.setattr(main.assistant, "handle", fake_handle)
+    monkeypatch.setattr(main.router, "route", fake_route)
     monkeypatch.setattr(main.wa, "send_text", fake_send_text)
     monkeypatch.setattr(main, "dedup", InMemoryDedupStore(ttl_seconds=60))
 
