@@ -1,27 +1,19 @@
 """Agente de Inventario: stock, umbrales y alertas.
 
-Funcional con datos simulados (INVENTARIO_MOCK). En la Fase 4 se conectará al
-ERP real y se añadirán alertas proactivas.
+Las existencias provienen del ERP (vía `ERPClient`): con `ERP_BASE_URL`
+configurado se consultan por HTTP; en desarrollo se usa el ERP simulado. Las
+alertas proactivas (cuando un producto cae bajo su umbral) llegan por el webhook
+`POST /webhooks/erp/inventory-alert` y se notifican al equipo.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import unicodedata
 
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
-
-# Stock simulado por producto (toneladas) con su umbral mínimo y ubicación.
-INVENTARIO_MOCK = {
-    "trigo cristalino": {"stock_ton": 200.0, "umbral_ton": 250.0, "ubicacion": "Silo Querétaro"},
-    "soya": {"stock_ton": 150.0, "umbral_ton": 200.0, "ubicacion": "Silo Veracruz"},
-    "maiz amarillo": {"stock_ton": 850.0, "umbral_ton": 300.0, "ubicacion": "Silo Bajío"},
-    "maiz blanco": {"stock_ton": 520.0, "umbral_ton": 250.0, "ubicacion": "Silo Bajío"},
-    "sorgo": {"stock_ton": 640.0, "umbral_ton": 200.0, "ubicacion": "Silo Sinaloa"},
-}
 
 SYSTEM_PROMPT = """\
 Eres el agente de Inventario de Intergranel, comercializadora de granos a \
@@ -82,27 +74,6 @@ TOOLS = [
 ]
 
 
-def _normalize(text: str) -> str:
-    text = text.strip().lower()
-    return "".join(
-        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
-    )
-
-
-def _estado(data: dict) -> str:
-    return "bajo_umbral" if data["stock_ton"] < data["umbral_ton"] else "normal"
-
-
-def _producto_dict(nombre: str, data: dict) -> dict:
-    return {
-        "producto": nombre,
-        "stock_ton": data["stock_ton"],
-        "umbral_ton": data["umbral_ton"],
-        "ubicacion": data["ubicacion"],
-        "estado": _estado(data),
-    }
-
-
 class InventarioAgent(BaseAgent):
     name = "inventario"
 
@@ -115,37 +86,28 @@ class InventarioAgent(BaseAgent):
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
         try:
             if name == "consultar_stock":
-                key = _normalize(tool_input["producto"])
-                data = INVENTARIO_MOCK.get(key)
-                if data is None:
-                    for nombre, d in INVENTARIO_MOCK.items():
-                        if key in nombre or nombre in key:
-                            key, data = nombre, d
-                            break
-                if data is None:
+                item = await self._erp.get_inventory_item(tool_input["producto"])
+                if item is None:
                     return json.dumps(
                         {"encontrado": False, "producto": tool_input["producto"]},
                         ensure_ascii=False,
                     )
                 return json.dumps(
-                    {"encontrado": True, **_producto_dict(key, data)},
-                    ensure_ascii=False,
+                    {"encontrado": True, **item.model_dump()}, ensure_ascii=False
                 )
 
             if name == "listar_alertas_inventario":
-                alertas = [
-                    _producto_dict(n, d)
-                    for n, d in INVENTARIO_MOCK.items()
-                    if _estado(d) == "bajo_umbral"
-                ]
+                items = await self._erp.list_inventory()
+                alertas = [i.model_dump() for i in items if i.estado == "bajo_umbral"]
                 return json.dumps(
                     {"total": len(alertas), "alertas": alertas}, ensure_ascii=False
                 )
 
             if name == "resumen_inventario":
-                productos = [_producto_dict(n, d) for n, d in INVENTARIO_MOCK.items()]
+                items = await self._erp.list_inventory()
                 return json.dumps(
-                    {"total": len(productos), "productos": productos}, ensure_ascii=False
+                    {"total": len(items), "productos": [i.model_dump() for i in items]},
+                    ensure_ascii=False,
                 )
 
             if name == "transferir_a_ventas":

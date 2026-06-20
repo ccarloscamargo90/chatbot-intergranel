@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from .config import get_settings
-from .models import OrderEvent
+from .models import InventoryAlertEvent, OrderEvent
 from .whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
@@ -91,3 +91,41 @@ async def notify_order_event(wa: WhatsAppClient, event: OrderEvent) -> dict:
 
     logger.info("Enviando texto a %s para orden %s", event.telefono, event.order_id)
     return await wa.send_text(event.telefono, mensaje)
+
+
+def build_inventory_message(event: InventoryAlertEvent) -> str:
+    if event.mensaje:
+        return event.mensaje
+    ubicacion = f" en {event.ubicacion}" if event.ubicacion else ""
+    return (
+        f"⚠️ Alerta de inventario: *{event.producto}*{ubicacion} está bajo el umbral.\n"
+        f"Stock actual: {event.stock_ton:g} ton (umbral: {event.umbral_ton:g} ton).\n"
+        "Conviene reabastecer."
+    )
+
+
+async def notify_inventory_alert(
+    wa: WhatsAppClient, event: InventoryAlertEvent
+) -> dict:
+    """Envía la alerta de inventario al equipo (INVENTORY_ALERT_PHONES).
+
+    Si no hay destinatarios configurados, solo se registra en el log.
+    """
+    settings = get_settings()
+    mensaje = build_inventory_message(event)
+    destinatarios = settings.inventory_alert_list
+
+    if not destinatarios:
+        logger.info(
+            "Alerta de inventario (%s) sin destinatarios configurados: %s",
+            event.producto,
+            mensaje,
+        )
+        return {"sent": 0, "recipients": []}
+
+    enviados = []
+    for telefono in destinatarios:
+        logger.info("Enviando alerta de inventario a %s (%s)", telefono, event.producto)
+        await wa.send_text(telefono, mensaje)
+        enviados.append(telefono)
+    return {"sent": len(enviados), "recipients": enviados}
