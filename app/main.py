@@ -8,11 +8,11 @@ import logging
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 
-from .assistant import Assistant
 from .config import get_settings
 from .dedup import get_dedup_store
 from .models import OrderEvent
 from .notifications import notify_order_event
+from .router import Router
 from .whatsapp import WhatsAppClient, verify_signature
 
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +22,7 @@ settings = get_settings()
 app = FastAPI(title="Intergranel · Asistente de WhatsApp")
 
 wa = WhatsAppClient()
-assistant = Assistant()
+router = Router()
 dedup = get_dedup_store()
 
 
@@ -136,7 +136,7 @@ async def _process_message(message: dict) -> None:
         mtype = message.get("type")
         if mtype == "text":
             text = message["text"]["body"]
-            reply = await assistant.handle(phone, text)
+            reply = await router.route(phone, text)
             await wa.send_text(phone, reply)
             return
 
@@ -150,7 +150,7 @@ async def _process_message(message: dict) -> None:
                 )
                 return
             content, store_text = built
-            reply = await assistant.handle(phone, content, store_text)
+            reply = await router.route(phone, content, store_text)
             await wa.send_text(phone, reply)
             return
 

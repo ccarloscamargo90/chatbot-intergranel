@@ -103,7 +103,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 64 tests pasando
+pytest -q                  # 86 tests pasando
 ```
 
 ## Estado actual y fases

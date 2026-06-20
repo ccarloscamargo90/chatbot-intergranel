@@ -71,7 +71,7 @@ def test_build_imagen_demasiado_grande(monkeypatch):
 def _patch_pipeline(monkeypatch):
     handled, sent = [], []
 
-    async def fake_handle(phone, content, store_text=None):
+    async def fake_route(phone, content, store_text=None):
         handled.append((phone, content, store_text))
         return "ok"
 
@@ -79,7 +79,7 @@ def _patch_pipeline(monkeypatch):
         sent.append((to, text))
         return {}
 
-    monkeypatch.setattr(main.assistant, "handle", fake_handle)
+    monkeypatch.setattr(main.router, "route", fake_route)
     monkeypatch.setattr(main.wa, "send_text", fake_send_text)
     monkeypatch.setattr(main, "dedup", InMemoryDedupStore(ttl_seconds=60))
     return handled, sent
@@ -111,6 +111,6 @@ def test_process_audio_no_soportado(monkeypatch):
         "audio": {"id": "A1"},
     }
     asyncio.run(main._process_message(message))
-    assert handled == []  # no se invoca al asistente
+    assert handled == []  # no se invoca al router
     assert len(sent) == 1  # se envía aviso
     assert "texto, imágenes y documentos PDF" in sent[0][1]
