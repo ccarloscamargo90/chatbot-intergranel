@@ -49,6 +49,23 @@ Body: { producto, stock_ton, umbral_ton, ubicacion?, mensaje? }
 ```
 El chatbot publica la alerta en su bus y notifica al equipo (`INVENTORY_ALERT_PHONES`).
 
+### Avisos al equipo (saliente ERP -> bot) · implementado en el ERP
+Lo que el ERP considera importante —lo que vence hoy, lo vencido, un pago
+estancado— se le manda por WhatsApp a la persona a la que le toca, según el
+calendario y su rol:
+```
+POST {BOT_WEBHOOK_URL}/webhooks/erp/notificacion
+Header: X-Webhook-Secret: <BOT_WEBHOOK_SECRET>   (= ERP_WEBHOOK_SECRET del bot)
+Body: { id, tipo, telefono, titulo, mensaje, url?, referencia?, empresa? }
+```
+El chatbot deduplica por `id`, publica el aviso en su bus (para tener contexto si
+la persona responde) y lo manda con la plantilla `WHATSAPP_AVISO_TEMPLATE`.
+
+A diferencia del resto de esta carpeta, esto **ya está implementado** en
+`ERP-INTERGRANEL` (`modules/avisos-whatsapp`), no es una referencia por copiar.
+El contrato completo, la plantilla de Meta y las variables están en
+`AVISOS_WHATSAPP.md`, en esta misma carpeta.
+
 ## Formato de los DTOs (lo que el chatbot espera)
 
 ```jsonc
