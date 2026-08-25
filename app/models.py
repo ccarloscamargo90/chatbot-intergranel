@@ -116,3 +116,30 @@ class OrderEvent(BaseModel):
     cliente: str | None = None
     # Texto opcional para sobrescribir el mensaje generado automáticamente.
     mensaje: str | None = None
+
+
+class ErpAvisoEvent(BaseModel):
+    """Aviso interno que el ERP manda a una persona del equipo.
+
+    Llega a /webhooks/erp/notificacion desde el worker de la outbox
+    `avisos_whatsapp`. A diferencia de OrderEvent (que va al CLIENTE), esto va
+    a alguien de la empresa: un vencimiento del calendario, un pago estancado,
+    un forward por liquidar.
+    """
+
+    # Id de la fila en la outbox del ERP. Es la llave de deduplicación: el
+    # worker reintenta y el mensaje no puede salir dos veces.
+    id: str
+    # `tipo` del catálogo de reglas, ej. "calendario.objetivo".
+    tipo: str
+    telefono: str  # E.164 sin '+', p.ej. 5215512345678
+    titulo: str
+    mensaje: str
+    # Liga profunda a la pantalla del ERP donde se resuelve el pendiente.
+    url: str | None = None
+    # `<prefijo>:<id>` de la entidad que lo originó, ej. "calendario_entrega:e1".
+    referencia: str | None = None
+    # Empresa que firma el aviso: el ERP corre para varias sobre el mismo
+    # código, así que la identidad viaja con el mensaje.
+    empresa: str | None = None
+

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from .config import get_settings
-from .models import InventoryAlertEvent, OrderEvent
+from .models import ErpAvisoEvent, InventoryAlertEvent, OrderEvent
 from .whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
@@ -129,3 +129,81 @@ async def notify_inventory_alert(
         await wa.send_text(telefono, mensaje)
         enviados.append(telefono)
     return {"sent": len(enviados), "recipients": enviados}
+
+
+# --------------------------------------------------------------------------- #
+# Avisos internos del ERP al equipo (calendario, pagos, forwards…).
+# --------------------------------------------------------------------------- #
+
+# Emoji por familia de aviso. Ayuda a distinguir de un vistazo un vencimiento
+# de un pendiente de cobranza cuando llegan varios en la mañana. Se busca por
+# prefijo del `tipo`, así un módulo nuevo hereda el de su familia sin tocar
+# esto; lo desconocido cae en el genérico.
+AVISO_EMOJI: dict[str, str] = {
+    "calendario.atraso": "🔴",
+    "calendario.objetivo": "📅",
+    "calendario.previo": "🗓️",
+    "calendario.recordatorio": "📌",
+    "pago": "💳",
+    "forward": "📈",
+    "reciba": "⚖️",
+    "traza": "🔍",
+    "deuda": "💰",
+    "almacen": "📦",
+    "nomina-operativa": "👷",
+}
+
+
+def _emoji_aviso(tipo: str) -> str:
+    """Emoji del tipo exacto, si no del módulo, si no el genérico."""
+    if tipo in AVISO_EMOJI:
+        return AVISO_EMOJI[tipo]
+    return AVISO_EMOJI.get(tipo.split(".", 1)[0], "🔔")
+
+
+def build_aviso_message(event: ErpAvisoEvent) -> str:
+    """Arma el texto del aviso interno.
+
+    El ERP ya redactó el título y el detalle —sabe de qué habla—, así que aquí
+    solo se le da forma de mensaje de WhatsApp: encabezado, cuerpo y a dónde ir
+    a resolverlo.
+    """
+    lineas = [f"{_emoji_aviso(event.tipo)} *{event.titulo}*", "", event.mensaje]
+    if event.url:
+        lineas += ["", f"Resuélvelo aquí: {event.url}"]
+    if event.empresa:
+        lineas += ["", f"_{event.empresa} · ERP_"]
+    return "\n".join(lineas)
+
+
+async def notify_erp_aviso(wa: WhatsAppClient, event: ErpAvisoEvent) -> dict:
+    """Manda el aviso interno por WhatsApp a la persona que le toca.
+
+    Fuera de la ventana de 24h Meta solo acepta plantillas aprobadas, y un
+    vencimiento avisado a las 7:30 casi nunca cae dentro de la ventana. Por eso
+    se usa la plantilla cuando está configurada y solo se cae a texto libre
+    cuando no la hay (desarrollo, o una conversación abierta).
+    """
+    settings = get_settings()
+
+    if settings.whatsapp_aviso_template:
+        logger.info(
+            "Enviando aviso %s (%s) a %s por plantilla", event.id, event.tipo, event.telefono
+        )
+        return await wa.send_template(
+            to=event.telefono,
+            template_name=settings.whatsapp_aviso_template,
+            language=settings.whatsapp_template_language,
+            body_params=[
+                event.titulo,
+                # La plantilla lleva el detalle y la liga en un solo parámetro:
+                # Meta no admite saltos de línea en los parámetros, así que se
+                # unen con separador.
+                f"{event.mensaje} {event.url}".strip() if event.url else event.mensaje,
+                event.empresa or settings.company_name,
+            ],
+        )
+
+    logger.info("Enviando aviso %s (%s) a %s como texto", event.id, event.tipo, event.telefono)
+    return await wa.send_text(event.telefono, build_aviso_message(event))
+

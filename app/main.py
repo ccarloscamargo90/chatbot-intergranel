@@ -11,8 +11,8 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 from .bus import get_event_bus
 from .config import get_settings
 from .dedup import get_dedup_store
-from .models import InventoryAlertEvent, OrderEvent
-from .notifications import notify_inventory_alert, notify_order_event
+from .models import ErpAvisoEvent, InventoryAlertEvent, OrderEvent
+from .notifications import notify_erp_aviso, notify_inventory_alert, notify_order_event
 from .router import Router
 from .whatsapp import WhatsAppClient, verify_signature
 
@@ -206,3 +206,55 @@ async def erp_inventory_alert(
     )
     result = await notify_inventory_alert(wa, event)
     return {"status": "sent", "result": result}
+
+
+# --------------------------------------------------------------------------- #
+# ERP: webhook de avisos internos -> notificación a la persona del equipo.
+#
+# Es el otro sentido del canal: /webhooks/erp/order-update avisa al CLIENTE,
+# esto avisa a alguien de la empresa (un vencimiento del calendario, un pago
+# estancado). Lo dispara el worker de la outbox `avisos_whatsapp` del ERP.
+# --------------------------------------------------------------------------- #
+# TTL del aviso en el bus: una semana para el detalle, un día para "lo último
+# que le mandamos a este teléfono".
+AVISO_TTL_SECONDS = 60 * 60 * 24 * 7
+AVISO_RECIENTE_TTL_SECONDS = 60 * 60 * 24
+
+
+def _wamid(resultado: dict) -> str | None:
+    """Extrae el wamid de la respuesta de Meta, o None en modo desarrollo."""
+    mensajes = resultado.get("messages") if isinstance(resultado, dict) else None
+    if isinstance(mensajes, list) and mensajes:
+        primero = mensajes[0]
+        if isinstance(primero, dict):
+            return primero.get("id")
+    return None
+
+
+@app.post("/webhooks/erp/notificacion")
+async def erp_notificacion(
+    event: ErpAvisoEvent,
+    x_webhook_secret: str = Header(default=""),
+) -> dict:
+    if settings.erp_webhook_secret and x_webhook_secret != settings.erp_webhook_secret:
+        raise HTTPException(status_code=401, detail="Secreto inválido")
+
+    # El worker del ERP reintenta ante timeouts, así que el mismo aviso puede
+    # llegar más de una vez. Se responde "duplicate" (que el ERP trata como
+    # entrega buena) en vez de mandarle el mensaje dos veces a la persona.
+    if await dedup.is_duplicate(f"aviso:{event.id}"):
+        logger.info("Aviso %s duplicado: no se reenvía", event.id)
+        return {"status": "duplicate"}
+
+    # El aviso queda en el bus para que, si la persona responde "¿cuál
+    # vencimiento?", el agente tenga el contexto en vez de contestar en frío.
+    bus = get_event_bus()
+    datos = event.model_dump()
+    await bus.publish(f"bus:erp:aviso:{event.id}", datos, ttl=AVISO_TTL_SECONDS)
+    await bus.publish(
+        f"bus:erp:aviso_reciente:{event.telefono}", datos, ttl=AVISO_RECIENTE_TTL_SECONDS
+    )
+
+    resultado = await notify_erp_aviso(wa, event)
+    return {"status": "sent", "wamid": _wamid(resultado), "result": resultado}
+

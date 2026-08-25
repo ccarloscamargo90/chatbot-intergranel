@@ -36,7 +36,7 @@ tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py
-docs/erp/               ← Implementación de referencia NestJS para el módulo bot del ERP
+docs/erp/               ← Implementación de referencia NestJS + contrato de avisos (AVISOS_WHATSAPP.md)
 ```
 
 ## Arquitectura del router
@@ -103,7 +103,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 123 tests pasando
+pytest -q                  # 135 tests pasando
 ```
 
 ## Estado actual y fases
@@ -150,6 +150,29 @@ solo log + bus).
 Endpoints que el ERP (NestJS) debe exponer:
 - `GET /api/v1/bot/inventario/:producto` → InventoryItem | 404
 - `GET /api/v1/bot/inventario` → lista de InventoryItem
+
+### Fase 5 ✅ — Avisos internos del ERP al equipo
+Completada. El ERP avisa por WhatsApp lo importante —lo que vence hoy, lo
+vencido, un pago estancado— a la persona a la que le toca, según el calendario y
+su rol. Nuevo webhook `POST /webhooks/erp/notificacion` (protegido por
+`ERP_WEBHOOK_SECRET`): deduplica por `id` (el worker del ERP reintenta y nadie
+puede recibir el mismo vencimiento dos veces), publica en el bus
+(`bus:erp:aviso:{id}` y `bus:erp:aviso_reciente:{telefono}`) para que el agente
+tenga contexto si la persona responde, y envía con `notify_erp_aviso`.
+
+Fuera de la ventana de 24h de Meta el texto libre se rechaza, así que en
+producción se usa una plantilla aprobada (`WHATSAPP_AVISO_TEMPLATE`, categoría
+Utility, parámetros: título · detalle+liga · empresa). Sin ella se cae a texto
+libre, que sirve en desarrollo.
+
+Quién decide qué sale y a quién vive del lado del ERP (catálogo de reglas por
+rol + preferencias por usuario). El contrato completo del webhook y la plantilla
+está en `docs/erp/AVISOS_WHATSAPP.md`.
+
+Respuestas del webhook:
+- `{"status": "sent", "wamid": "…"}` → el ERP marca ENVIADO y guarda el wamid
+- `{"status": "duplicate"}` → el ERP lo trata como entrega buena, no reintenta
+- `401` → secreto inválido; el ERP reintenta con backoff y marca FALLIDO
 
 ## Especificación de agentes
 
@@ -222,6 +245,7 @@ ANTHROPIC_API_KEY, CLAUDE_MODEL (default: claude-opus-4-8)
 WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 ERP_BASE_URL (vacío = mock), ERP_API_KEY, ERP_API_KEY_HEADER (default: X-Bot-Api-Key)
 ERP_WEBHOOK_SECRET
+WHATSAPP_AVISO_TEMPLATE (vacío = texto libre; obligatoria en producción)
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
 COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
 INVENTORY_ALERT_PHONES (vacío = solo log+bus; lista separada por comas)

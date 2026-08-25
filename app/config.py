@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # dentro de la ventana de 24h de servicio al cliente).
     whatsapp_order_template: str = ""
     whatsapp_template_language: str = "es_MX"
+    # Plantilla aprobada para los AVISOS INTERNOS del ERP al equipo (categoría
+    # Utility). Es obligatoria en producción: un vencimiento que se avisa a las
+    # 7:30 casi nunca cae dentro de la ventana de 24h, y sin plantilla Meta
+    # rechaza el mensaje. Vacía = texto libre (desarrollo y dentro de ventana).
+    # Parámetros del cuerpo, en orden: {{1}} título, {{2}} detalle, {{3}} empresa.
+    whatsapp_aviso_template: str = ""
 
     # --- ERP / API externo de órdenes ---
     # Si erp_base_url está vacío, se usa un ERP simulado en memoria (para desarrollo).
