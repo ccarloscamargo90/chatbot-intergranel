@@ -106,14 +106,18 @@ el puente:
   tiene otras reglas de entrega).
 - **Idioma:** `es_MX`.
 - **Nombre sugerido:** `erp_aviso` → va en `WHATSAPP_AVISO_TEMPLATE`.
+- **Título (encabezado):** vacío. El puente no manda parámetros de encabezado;
+  una variable ahí hace que Meta rechace el envío.
 - **Cuerpo:**
 
   ```
+  Tienes un pendiente en el ERP:
+
   *{{1}}*
 
   {{2}}
 
-  _{{3}} · ERP_
+  Este aviso es de {{3}}. Entra al ERP para ver el detalle y marcar el avance.
   ```
 
   | Parámetro | Contenido |
@@ -121,6 +125,23 @@ el puente:
   | `{{1}}` | `titulo` |
   | `{{2}}` | `mensaje` + la liga, unidos con espacio (Meta no admite saltos de línea en los parámetros) |
   | `{{3}}` | `empresa`, o `COMPANY_NAME` si el aviso no la trae |
+
+### Dos reglas de Meta que rechazan la plantilla al capturarla
+
+Ambas se descubrieron en el alta real, no en la documentación:
+
+1. **Una variable no puede abrir ni cerrar el cuerpo.** Una primera versión
+   empezaba con `*{{1}}*` y terminaba con `_{{3}} · ERP_`; Meta la rechazó por
+   las dos puntas. Por eso el cuerpo de arriba abre con "Tienes un pendiente en
+   el ERP:" y cierra con la invitación a entrar.
+2. **Tiene que haber suficiente texto fijo para tantas variables.** Aquella
+   versión eran 3 variables en 29 caracteres y Meta contestó "demasiadas
+   variables en relación con su longitud". La de arriba tiene el mismo número de
+   variables sobre ~140 caracteres.
+
+Si se cambia el texto, cuidar que el ORDEN de los parámetros no se mueva: es el
+que manda `notify_erp_aviso` del chatbot. Reordenarlos exige tocar código y
+volver a desplegar; envolverlos en más texto fijo, no.
 
 Sin `WHATSAPP_AVISO_TEMPLATE` el chatbot manda **texto libre**. Eso está bien en
 desarrollo y para quien tenga una conversación abierta, pero no es la
