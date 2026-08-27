@@ -192,3 +192,95 @@ def test_webhook_exige_los_campos_minimos():
     # Sin teléfono no hay a quién mandarle: mejor 422 que un mensaje al vacío.
     resp = client.post("/webhooks/erp/notificacion", json={"id": "x", "tipo": "y"})
     assert resp.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Reintentos: un envío fallido NO puede quedar sellado como duplicado
+# --------------------------------------------------------------------------- #
+def test_un_fallo_libera_la_marca_para_que_el_reintento_si_salga(monkeypatch):
+    """El bug que se llevó una tarde: `is_duplicate` marca ANTES de mandar.
+
+    Si el envío falla y la marca se queda puesta, el reintento del ERP entra por
+    la rama de "duplicate" —que el ERP trata como entrega buena— y el aviso
+    queda marcado ENVIADO sin que nadie lo haya recibido, sin más reintentos.
+    """
+    intentos = []
+
+    async def falla_la_primera(to, text):
+        intentos.append(to)
+        if len(intentos) == 1:
+            raise RuntimeError("Meta rechazó el mensaje")
+        return {"messages": [{"id": "wamid.SEGUNDO"}]}
+
+    monkeypatch.setattr(main.wa, "send_text", falla_la_primera)
+
+    primero = client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-reintento"))
+    segundo = client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-reintento"))
+
+    assert primero.json()["status"] == "failed"
+    # Lo importante: el reintento NO se descarta como duplicado.
+    assert segundo.json()["status"] == "sent"
+    assert segundo.json()["wamid"] == "wamid.SEGUNDO"
+    assert len(intentos) == 2
+
+
+def test_una_entrega_buena_si_sella_contra_duplicados(monkeypatch):
+    # El candado sigue vivo para el caso que sí importa: el ERP reintenta ante
+    # timeouts y nadie puede recibir el mismo vencimiento dos veces.
+    enviados = []
+
+    async def fake_send_text(to, text):
+        enviados.append(to)
+        return {"messages": [{"id": "wamid.OK"}]}
+
+    monkeypatch.setattr(main.wa, "send_text", fake_send_text)
+
+    client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-sellado"))
+    segundo = client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-sellado"))
+
+    assert segundo.json()["status"] == "duplicate"
+    assert len(enviados) == 1
+
+
+def test_el_motivo_de_meta_llega_al_erp(monkeypatch):
+    """Sin esto, la bandeja solo dice "Request failed with status code 500"."""
+
+    class RespuestaMeta:
+        status_code = 404
+        text = "…"
+
+        def json(self):
+            return {
+                "error": {
+                    "message": "(#132001) Template name does not exist in the translation",
+                    "error_data": {"details": "template name (erp_aviso) does not exist in es_MX"},
+                }
+            }
+
+    class ErrorHttp(Exception):
+        response = RespuestaMeta()
+
+    async def rechaza(to, text):
+        raise ErrorHttp()
+
+    monkeypatch.setattr(main.wa, "send_text", rechaza)
+
+    resp = client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-motivo"))
+
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert "132001" in body["error"]
+    assert "es_MX" in body["error"]
+    assert body["error"].startswith("Meta 404:")
+
+
+def test_un_fallo_sin_respuesta_de_meta_igual_explica_algo(monkeypatch):
+    async def revienta(to, text):
+        raise ConnectionError("se cayó la red")
+
+    monkeypatch.setattr(main.wa, "send_text", revienta)
+
+    resp = client.post("/webhooks/erp/notificacion", json=aviso(id="aviso-sin-respuesta"))
+
+    assert resp.json()["error"] == "ConnectionError: se cayó la red"
+

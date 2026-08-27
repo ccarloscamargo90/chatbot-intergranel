@@ -25,6 +25,16 @@ class DedupStore(abc.ABC):
     async def is_duplicate(self, key: str) -> bool:
         """Marca `key` como vista y devuelve True si YA había sido vista."""
 
+    @abc.abstractmethod
+    async def release(self, key: str) -> None:
+        """Olvida `key` para que un reintento posterior NO se tome por duplicado.
+
+        `is_duplicate` marca antes de que el trabajo ocurra —tiene que hacerlo,
+        o dos entregas concurrentes se colarían—. Si ese trabajo falla, la marca
+        se vuelve una trampa: el reintento se descarta y el mensaje se pierde
+        para siempre. Soltarla es lo que cierra ese hueco.
+        """
+
 
 class InMemoryDedupStore(DedupStore):
     def __init__(self, ttl_seconds: int) -> None:
@@ -40,6 +50,9 @@ class InMemoryDedupStore(DedupStore):
             return True
         self._seen[key] = now + self._ttl
         return False
+
+    async def release(self, key: str) -> None:
+        self._seen.pop(key, None)
 
 
 class RedisDedupStore(DedupStore):
@@ -57,6 +70,9 @@ class RedisDedupStore(DedupStore):
             f"{self._prefix}{key}", "1", nx=True, ex=self._ttl
         )
         return not was_set
+
+    async def release(self, key: str) -> None:
+        await self._redis.delete(f"{self._prefix}{key}")
 
 
 def get_dedup_store() -> DedupStore:
