@@ -231,6 +231,29 @@ def _wamid(resultado: dict) -> str | None:
     return None
 
 
+def _detalle_error(exc: Exception) -> str:
+    """El motivo REAL del fallo, en una línea que el ERP pueda guardar.
+
+    Cuando Meta rechaza el envío, su respuesta trae el diagnóstico exacto
+    ("template name (erp_aviso) does not exist in es_MX"). Sin esto el ERP solo
+    ve "Request failed with status code 500" y hay que ir a leer logs — que es
+    justo lo que la bandeja de avisos existe para evitar.
+    """
+    respuesta = getattr(exc, "response", None)
+    if respuesta is not None:
+        try:
+            error = respuesta.json().get("error", {})
+        except Exception:  # noqa: BLE001 - el cuerpo puede no ser JSON
+            error = {}
+        detalle = (error.get("error_data") or {}).get("details")
+        mensaje = error.get("message")
+        partes = [p for p in (mensaje, detalle) if p]
+        if partes:
+            return f"Meta {respuesta.status_code}: {' · '.join(partes)}"
+        return f"Meta {respuesta.status_code}: {respuesta.text[:300]}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 @app.post("/webhooks/erp/notificacion")
 async def erp_notificacion(
     event: ErpAvisoEvent,
@@ -242,7 +265,8 @@ async def erp_notificacion(
     # El worker del ERP reintenta ante timeouts, así que el mismo aviso puede
     # llegar más de una vez. Se responde "duplicate" (que el ERP trata como
     # entrega buena) en vez de mandarle el mensaje dos veces a la persona.
-    if await dedup.is_duplicate(f"aviso:{event.id}"):
+    clave_dedup = f"aviso:{event.id}"
+    if await dedup.is_duplicate(clave_dedup):
         logger.info("Aviso %s duplicado: no se reenvía", event.id)
         return {"status": "duplicate"}
 
@@ -255,6 +279,21 @@ async def erp_notificacion(
         f"bus:erp:aviso_reciente:{event.telefono}", datos, ttl=AVISO_RECIENTE_TTL_SECONDS
     )
 
-    resultado = await notify_erp_aviso(wa, event)
+    try:
+        resultado = await notify_erp_aviso(wa, event)
+    except Exception as exc:  # noqa: BLE001 - cualquier fallo tiene que soltar la marca
+        # El aviso NO salió. Si la marca de deduplicación se queda puesta, el
+        # reintento del ERP entra por la rama de "duplicate", que el ERP trata
+        # como entrega buena: el aviso quedaría marcado ENVIADO sin que nadie lo
+        # recibiera, y sin más reintentos. Soltarla es lo que hace que el
+        # reintento sirva de algo.
+        await dedup.release(clave_dedup)
+        motivo = _detalle_error(exc)
+        logger.error("No se pudo entregar el aviso %s: %s", event.id, motivo)
+        # 200 con status="failed": el detalle viaja en el cuerpo para que el ERP
+        # lo guarde en su outbox. Un 5xx solo le daría "Request failed with
+        # status code 500", que no dice nada.
+        return {"status": "failed", "error": motivo}
+
     return {"status": "sent", "wamid": _wamid(resultado), "result": resultado}
 
