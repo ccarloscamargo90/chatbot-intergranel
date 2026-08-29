@@ -21,6 +21,7 @@ from ..bus import EventBus, get_event_bus
 from ..config import get_settings
 from ..erp import ERPClient, get_erp_client
 from ..history import HistoryStore, get_history_store
+from ..replies import Reply
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +83,21 @@ class BaseAgent(abc.ABC):
             history.pop(0)
         return history
 
+    async def decorate(self, phone: str, texto: str) -> Reply:
+        """Gancho para que un agente adjunte botones a su respuesta.
+
+        Por defecto la respuesta es texto pelón. Un agente que tenga un menú
+        (hoy, Soporte con el autoservicio del cliente) lo sobrescribe para
+        colgarle los botones que correspondan al estado de la conversación.
+        """
+        return Reply(texto=texto)
+
     async def handle(
         self,
         phone: str,
         content: str | list,
         store_text: str | None = None,
-    ) -> str:
+    ) -> Reply:
         """Procesa un mensaje entrante y devuelve la respuesta del agente.
 
         `content` es el contenido del turno del usuario para la API: un string
@@ -147,4 +157,7 @@ class BaseAgent(abc.ABC):
             # de persistir (no guardar base64 de imágenes/PDF).
             history[user_index] = {"role": "user", "content": store_text}
             await self._history_store.save(key, self._trim(history))
-            return reply or "Disculpe, no pude generar una respuesta. ¿Puede reformular su mensaje?"
+            texto = reply or (
+                "Disculpe, no pude generar una respuesta. ¿Puede reformular su mensaje?"
+            )
+            return await self.decorate(phone, texto)

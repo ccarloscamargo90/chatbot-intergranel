@@ -124,6 +124,21 @@ async def _build_media_content(message: dict) -> tuple[list, str] | None:
     return blocks, placeholder
 
 
+def _texto_interactivo(message: dict) -> str | None:
+    """El id del botón o de la fila que tocó el cliente.
+
+    Meta manda el toque como `interactive.button_reply` (botones) o
+    `interactive.list_reply` (menú de lista); en ambos casos trae `id` y
+    `title`. Nos quedamos con el **id**, que es el contrato estable: el título
+    es texto de pantalla y puede cambiar al reescribir un menú, mientras que el
+    id es lo que `menus.py` y el router acordaron.
+    """
+    interactivo = message.get("interactive", {})
+    respuesta = interactivo.get("button_reply") or interactivo.get("list_reply") or {}
+    boton_id = (respuesta.get("id") or "").strip()
+    return boton_id or (respuesta.get("title") or "").strip() or None
+
+
 async def _process_message(message: dict) -> None:
     phone = message.get("from")
     if not phone:
@@ -138,7 +153,18 @@ async def _process_message(message: dict) -> None:
         if mtype == "text":
             text = message["text"]["body"]
             reply = await router.route(phone, text)
-            await wa.send_text(phone, reply)
+            await wa.send_reply(phone, reply)
+            return
+
+        if mtype == "interactive":
+            seleccion = _texto_interactivo(message)
+            if seleccion is None:
+                await wa.send_text(
+                    phone, "No alcancé a ver qué opción eligió. ¿Puede intentarlo otra vez?"
+                )
+                return
+            reply = await router.route(phone, seleccion)
+            await wa.send_reply(phone, reply)
             return
 
         if mtype in ("image", "document"):
@@ -152,7 +178,7 @@ async def _process_message(message: dict) -> None:
                 return
             content, store_text = built
             reply = await router.route(phone, content, store_text)
-            await wa.send_text(phone, reply)
+            await wa.send_reply(phone, reply)
             return
 
         await wa.send_text(

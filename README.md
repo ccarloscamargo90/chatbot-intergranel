@@ -24,8 +24,12 @@ ERP (evento de orden) ─▶ POST /webhooks/erp/order-update ─▶ plantilla/te
 | Archivo | Responsabilidad |
 |---|---|
 | `app/main.py` | App FastAPI y endpoints (webhooks) |
+| `app/router.py` | Clasifica el mensaje (o lee el botón) y despacha al agente |
 | `app/assistant.py` | Integración con Claude + herramientas |
 | `app/whatsapp.py` | Cliente de la WhatsApp Cloud API |
+| `app/replies.py` | Respuestas con botones, dentro de los topes de Meta |
+| `app/menus.py` | Menú del autoservicio del cliente |
+| `app/sesiones.py` | Sesión del cliente identificado |
 | `app/erp.py` | Cliente del ERP (HTTP real + mock) |
 | `app/notifications.py` | Notificaciones proactivas de órdenes |
 | `app/config.py` | Configuración por variables de entorno |
@@ -91,6 +95,11 @@ debe incluir el prefijo, p. ej. `https://erp-intergranel.example.com/api/v1`:
 
 - `GET {ERP_BASE_URL}/bot/ordenes/{folio}` → una orden (`Order` JSON) | `404`
 - `GET {ERP_BASE_URL}/bot/ordenes?telefono={tel}` → lista de `Order` (JSON)
+
+Para el **autoservicio del cliente** (que consulte lo suyo identificándose con
+su nombre o razón social y su RFC) el contrato es aparte, con su propia sesión;
+está completo en
+[`docs/erp/AUTOSERVICIO_CLIENTES.md`](docs/erp/AUTOSERVICIO_CLIENTES.md).
 
 El formato de cada orden es el modelo `Order` de `app/models.py`. En el ERP de
 Intergranel (NestJS), la "orden del cliente" corresponde a un **Contrato**

@@ -22,21 +22,27 @@ Un chatbot de WhatsApp con **un solo número** y un **router central** que clasi
 ```
 app/
   main.py              ← FastAPI, webhooks, _process_message → router.route()
-  router.py            ← Clasifica intención → despacha al agente
+  router.py            ← Clasifica intención (o lee un botón) → despacha al agente
   bus.py               ← Bus de eventos compartido (Redis / InMemory)
+  replies.py           ← Reply/Boton/MenuLista: texto + botones, con los topes de Meta
+  menus.py             ← Menú del autoservicio del cliente e ids `cli_*` → acción
+  sesiones.py          ← Sesión del cliente identificado, sobre el bus
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
     ventas.py           ← Funcional, precios/cotizaciones vía ERP
     compras.py          ← Funcional vía ERP, con lista blanca de teléfonos
     inventario.py       ← Funcional vía ERP, con alertas proactivas
-    soporte.py          ← Migrado del asistente original
+    soporte.py          ← Atención al cliente + autoservicio (identificación por RFC)
   assistant.py          ← Wrapper compat para tests legacy
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
 tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
-  test_media.py, test_signature.py
-docs/erp/               ← Implementación de referencia NestJS + contrato de avisos (AVISOS_WHATSAPP.md)
+  test_media.py, test_signature.py, test_soporte.py, test_compras.py,
+  test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py
+docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
+                          (AVISOS_WHATSAPP.md) y de autoservicio del cliente
+                          (AUTOSERVICIO_CLIENTES.md)
 ```
 
 ## Arquitectura del router
@@ -45,10 +51,12 @@ docs/erp/               ← Implementación de referencia NestJS + contrato de a
 Mensaje de WhatsApp
     │
     ▼
-Router.route(phone, content)
+Router.route(phone, content) -> Reply
     │
-    ├─ 1. Comando explícito? (/ventas, /menu, /soporte, /compras, /inventario)
-    │     → Enrutar directamente al agente nombrado
+    ├─ 1. Comando explícito?
+    │     · /ventas, /menu, /soporte, /compras, /inventario
+    │     · id de un botón del menú (cli_saldo, cli_pedidos, …)
+    │     → Enrutar directamente al agente que le toca
     │
     ├─ 2. Sesión activa en bus? (bus:session:{phone}:agente, TTL 30min)
     │     → Mismo agente que el turno anterior (continuidad)
@@ -57,6 +65,10 @@ Router.route(phone, content)
           → Una palabra: ventas|compras|inventario|soporte
           → Fallback: soporte
 ```
+
+Un toque de botón NO se clasifica: ya es una intención exacta. Preguntarle a un
+modelo qué quiso decir quien ya nos lo dijo sería gastar tiempo para perder
+precisión.
 
 ## Interfaz de BaseAgent (app/agents/base.py)
 
@@ -69,7 +81,11 @@ Cada agente hereda de `BaseAgent` y define:
 
 `BaseAgent.handle(phone, content, store_text)` implementa el loop agéntico completo:
 cargar historial → llamar a Claude → si tool_use, ejecutar tools y continuar → persistir historial.
-MAX_HISTORY = 24 mensajes.
+MAX_HISTORY = 24 mensajes. Devuelve un `Reply`, no un string.
+
+`decorate(phone, texto) -> Reply` es el gancho para colgarle botones a la
+respuesta. Por defecto devuelve texto pelón; Soporte lo sobrescribe para mandar
+el menú o los botones de seguimiento según el estado de la conversación.
 
 ## Bus de eventos (app/bus.py)
 
@@ -83,6 +99,30 @@ agent = await self._bus.get_active_agent(phone)          # -> "ventas" | None
 
 Convención de claves: `bus:{agente}:{tipo}:{identificador}`.
 Implementaciones: `InMemoryEventBus` (dev) y `RedisEventBus` (prod).
+
+## Botones (app/replies.py, app/menus.py)
+
+Un agente devuelve `Reply`: texto y, opcionalmente, botones o un menú de lista.
+`WhatsAppClient.send_reply` decide el tipo de mensaje; si el interactivo falla,
+cae a texto (perder los botones es un mal menor, perder la respuesta no).
+
+```python
+Reply("Su saldo es $204,500.00 MXN", botones=[Boton("cli_menu", "📋 Menú")])
+Reply("¿Qué desea consultar?", lista=menu_cliente(identificado=True))
+```
+
+Los topes de Meta son duros: 3 botones (título 20 chars) o 10 filas de lista
+(título 24). Pasarse hace que Meta rechace el **mensaje entero**, así que
+`replies.py` recorta al construir, no al enviar.
+
+El ciclo completo: cada opción tiene un id `cli_*` y una frase canónica en
+`menus.py`. Cuando el cliente toca, `main.py` lee el **id** del webhook (no el
+título: el título es texto de pantalla y cambia al reescribir un menú) y el
+router lo trata como comando explícito, despachando al agente con la frase. El
+agente nunca se entera de que hubo un botón.
+
+Al agregar una opción al menú: id nuevo en `menus.py`, entrada en `ACCIONES`, y
+listo. `test_botones.py` falla si un id del menú se queda sin acción.
 
 ## Transferencias entre agentes
 
@@ -98,12 +138,18 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 6. **Tests sin red.** Nunca llaman a Claude ni a servicios externos. Construir agentes con `AgentClass.__new__(AgentClass)` y ejercitar `run_tool` contra `MockERPClient`. Para integración, monkeypatchear `router.route` y `wa.send_text`.
 7. **Bus para comunicación.** Eventos entre agentes van al bus con la convención `bus:{agente}:{tipo}:{id}`.
 8. **Historial limpio.** Se serializa como dicts JSON (no Pydantic). Para multimedia, guardar solo placeholder de texto.
+9. **Los datos del cliente van tras la sesión.** Toda tool que devuelva algo de
+   la cuenta de un cliente (pedidos, contratos, facturas, saldo) se declara en
+   `TOOLS_CON_SESION` de `soporte.py`. Si se agrega una y se olvida, queda
+   abierta; `test_soporte.py` lo detecta comparando la lista contra las tools
+   declaradas. Nunca buscar por folio global: buscar **entre los del cliente**,
+   para que adivinar un folio no sirva de nada.
 
 ## Verificación rápida
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 135 tests pasando
+pytest -q                  # 186 tests pasando
 ```
 
 ## Estado actual y fases
@@ -174,6 +220,48 @@ Respuestas del webhook:
 - `{"status": "duplicate"}` → el ERP lo trata como entrega buena, no reintenta
 - `401` → secreto inválido; el ERP reintenta con backoff y marca FALLIDO
 
+### Fase 6 ✅ — Autoservicio del cliente (identificación + botones)
+Completada. El cliente consulta **lo suyo** —pedidos, contratos, facturas,
+saldo y lo vencido— identificándose con su nombre (o el de su empresa) y su RFC.
+El ERP valida el par, abre una sesión con caducidad y devuelve un token; el bot
+consulta con ese token en `X-Bot-Sesion` y **nunca** con un id de cliente.
+
+Qué tan fuerte es eso, dicho sin adornos: el RFC de una empresa va impreso en
+cada factura que emite, así que identifica pero no es un secreto. Lo que
+sostiene el candado son cuatro cosas juntas: hay que acertar los DOS datos; los
+intentos se cuentan por teléfono y se bloquean; todo intento queda en la
+bitácora del ERP; y el fallo nunca dice cuál de los dos datos falló ni si el RFC
+existe — si lo dijera, el bot sería un verificador de RFCs. Los RFC genéricos
+del SAT (XAXX/XEXX) se rechazan: se repiten entre clientes.
+
+**Cambio de comportamiento:** `listar_ordenes_cliente` (que listaba los
+contratos de quien escribiera, sin autenticar) desapareció, y `consultar_orden`
+ya no busca por folio global sino entre los contratos del cliente identificado.
+Antes bastaba saber —o adivinar— un folio para leer el contrato de otro.
+
+Se extendió `ERPClient` con `identify_customer`, `get_customer_summary`,
+`get_customer_debt`, `list_customer_contracts`, `list_customer_orders`,
+`list_customer_invoices` y `close_customer_session` (abstracto + `HTTPERPClient`
++ `MockERPClient`), y se añadieron los modelos `CustomerIdentification`,
+`CustomerDebt`, `CustomerDebtLine`, `CustomerOrder`, `CustomerInvoice` y
+`CustomerSummary`. Un 401 del ERP se traduce a `SesionClienteInvalida`, que el
+agente cuenta como "su sesión caducó", no como una falla técnica.
+
+Toda la conversación se maneja con **botones** (ver la sección de arriba): menú
+de lista al identificarse, y `[📋 Menú] [👤 Asesor]` pegados a cada respuesta.
+
+Endpoints que el ERP expone (ya implementados en `ERP-INTERGRANEL`):
+- `POST /api/v1/bot/clientes/identificar` (body `{ nombre, rfc, telefono }`) → `Identificacion`
+- `GET /api/v1/bot/clientes/resumen` → `CustomerSummary`
+- `GET /api/v1/bot/clientes/deuda` → `CustomerDebt`
+- `GET /api/v1/bot/clientes/contratos` → `Order[]`
+- `GET /api/v1/bot/clientes/pedidos` → `CustomerOrder[]`
+- `GET /api/v1/bot/clientes/facturas` → `CustomerInvoice[]`
+- `POST /api/v1/bot/clientes/cerrar-sesion`
+
+Contrato completo (incluida la nota honesta sobre la fuerza de la
+identificación) en `docs/erp/AUTOSERVICIO_CLIENTES.md`.
+
 ## Especificación de agentes
 
 ### Ventas (agents/ventas.py) — Funcional vía ERP (mock o HTTP)
@@ -189,13 +277,27 @@ Respuestas del webhook:
 
 Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
 
-### Soporte (agents/soporte.py) — Funcional
+### Soporte (agents/soporte.py) — Atención al cliente + autoservicio
 
-| Tool | Params requeridos | Qué hace |
-|---|---|---|
-| consultar_orden | order_id | Estado y detalles por folio |
-| listar_ordenes_cliente | — | Órdenes del remitente |
-| escalar_a_humano | motivo | Log + mensaje de escalamiento |
+| Tool | Params requeridos | Sesión | Qué hace |
+|---|---|---|---|
+| identificar_cliente | nombre, rfc | — | Valida el par contra el ERP y abre sesión |
+| resumen_de_mi_cuenta | — | ✔ | Contratos, pedidos, facturas pendientes y saldo |
+| consultar_mi_saldo | — | ✔ | Estado de cuenta: total, vencido y renglones |
+| listar_mis_contratos | — | ✔ | Contratos del cliente identificado |
+| listar_mis_pedidos | — | ✔ | Pedidos con estado y fecha de entrega |
+| listar_mis_facturas | — | ✔ | Facturas con monto, saldo y estado |
+| consultar_orden | order_id | ✔ | Un contrato **de los suyos**, por folio |
+| cerrar_sesion | — | ✔ | Deja de mostrar su información |
+| escalar_a_humano | motivo | — | Log + mensaje de escalamiento |
+
+Las tools marcadas con ✔ están declaradas en `TOOLS_CON_SESION`: sin sesión
+devuelven `identificado: false` y el agente pide identificarse. Freno local de
+intentos en `sesiones.py` (`MAX_INTENTOS_LOCALES`); el bloqueo que cuenta y
+audita lo lleva el ERP.
+
+Cliente del mock (`MockERPClient`): Molinos del Bajío S.A. de C.V., RFC
+`MBA950101AB1` — saldo $204,500.00 con $112,500.00 vencidos.
 
 ### Compras (agents/compras.py) — Funcional vía ERP (mock o HTTP)
 
@@ -250,3 +352,9 @@ REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
 COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
 INVENTORY_ALERT_PHONES (vacío = solo log+bus; lista separada por comas)
 ```
+
+El autoservicio del cliente no agrega variables aquí: sus topes (intentos,
+bloqueo, duración de la sesión) viven del lado del ERP
+(`BOT_CLIENTE_MAX_INTENTOS`, `BOT_CLIENTE_BLOQUEO_MINUTOS`,
+`BOT_CLIENTE_SESION_MINUTOS`), que es quien manda `expira_en_segundos` en la
+respuesta de identificación.

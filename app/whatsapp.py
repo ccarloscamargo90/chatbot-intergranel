@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from .config import get_settings
+from .replies import MAX_CUERPO, Reply
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,98 @@ class WhatsAppClient:
             "text": {"body": text[:4096]},
         }
         return await self._post(payload)
+
+    async def send_buttons(
+        self,
+        to: str,
+        body: str,
+        buttons: list[dict],
+        header: str = "",
+        footer: str = "",
+    ) -> dict[str, Any]:
+        """Envía hasta 3 botones de respuesta rápida.
+
+        `buttons` ya viene en el formato de Meta (ver `Boton.to_payload`)."""
+        interactive: dict[str, Any] = {
+            "type": "button",
+            "body": {"text": body[:MAX_CUERPO]},
+            "action": {"buttons": buttons},
+        }
+        if header:
+            interactive["header"] = {"type": "text", "text": header[:60]}
+        if footer:
+            interactive["footer"] = {"text": footer[:60]}
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "interactive",
+                "interactive": interactive,
+            }
+        )
+
+    async def send_list(
+        self,
+        to: str,
+        body: str,
+        action: dict,
+        header: str = "",
+        footer: str = "",
+    ) -> dict[str, Any]:
+        """Envía un menú de lista (hasta 10 filas).
+
+        `action` ya viene en el formato de Meta (ver `MenuLista.to_payload`)."""
+        interactive: dict[str, Any] = {
+            "type": "list",
+            "body": {"text": body[:MAX_CUERPO]},
+            "action": action,
+        }
+        if header:
+            interactive["header"] = {"type": "text", "text": header[:60]}
+        if footer:
+            interactive["footer"] = {"text": footer[:60]}
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "interactive",
+                "interactive": interactive,
+            }
+        )
+
+    async def send_reply(self, to: str, reply: Reply | str) -> dict[str, Any]:
+        """Envía una `Reply`: texto, botones o menú, según lo que traiga.
+
+        Es el único punto por el que se contesta a un cliente, para que ningún
+        agente tenga que saber cómo se arma un mensaje interactivo de Meta. Si
+        el envío interactivo falla (un título inválido, una lista mal armada),
+        cae a texto: el cliente prefiere la respuesta sin botones antes que el
+        silencio.
+        """
+        reply = Reply.coerce(reply)
+        if not reply.es_interactiva:
+            return await self.send_text(to, reply.texto)
+        try:
+            if reply.lista is not None:
+                return await self.send_list(
+                    to,
+                    reply.texto,
+                    reply.lista.to_payload(),
+                    header=reply.encabezado,
+                    footer=reply.pie,
+                )
+            return await self.send_buttons(
+                to,
+                reply.texto,
+                [b.to_payload() for b in reply.botones],
+                header=reply.encabezado,
+                footer=reply.pie,
+            )
+        except Exception:  # noqa: BLE001 - degradar a texto, nunca callar
+            logger.exception("Falló el mensaje interactivo a %s; se manda como texto", to)
+            return await self.send_text(to, reply.texto)
 
     async def send_template(
         self,
