@@ -100,24 +100,28 @@ casi nunca cae dentro de esa ventana: sin plantilla aprobada, el mensaje se
 rechaza y en la outbox aparece `FALLIDO` con el error de Meta.
 
 Hay que dar de alta una plantilla en **Meta Business Manager** antes de prender
-el puente:
+el puente. Ésta es la que está aprobada y en producción:
 
-- **Categoría:** Utility (no Marketing — es un aviso operativo, y Marketing
-  tiene otras reglas de entrega).
+- **Dónde:** en la **misma WABA dueña de `WHATSAPP_PHONE_NUMBER_ID`**. Una
+  plantilla creada en otro portafolio de negocio no existe para ese número, y
+  el envío falla con `#132001` aunque el nombre y el idioma estén bien. Es el
+  primer error que conviene descartar, no el último (ver §6).
+- **Categoría:** Utility. No Marketing — ver la regla 3 de abajo.
 - **Idioma:** `es_MX`.
-- **Nombre sugerido:** `erp_aviso` → va en `WHATSAPP_AVISO_TEMPLATE`.
-- **Título (encabezado):** vacío. El puente no manda parámetros de encabezado;
-  una variable ahí hace que Meta rechace el envío.
+- **Nombre:** `erp_aviso` → va en `WHATSAPP_AVISO_TEMPLATE`.
+- **Encabezado, pie de página y botones:** vacíos. El puente manda **solo
+  parámetros de cuerpo**; una variable en el encabezado o un botón hace que
+  Meta rechace el envío aunque la plantilla quede aprobada.
 - **Cuerpo:**
 
   ```
-  Tienes un pendiente en el ERP:
+  Recordatorio de un pendiente registrado a tu nombre en el sistema:
 
-  *{{1}}*
+  Asunto: {{1}}
 
-  {{2}}
+  Detalle y liga de acceso: {{2}}
 
-  Este aviso es de {{3}}. Entra al ERP para ver el detalle y marcar el avance.
+  Este recordatorio corresponde a tu cuenta de usuario en {{3}}. Ingresa al sistema para consultar el estado y registrar el avance.
   ```
 
   | Parámetro | Contenido |
@@ -126,22 +130,39 @@ el puente:
   | `{{2}}` | `mensaje` + la liga, unidos con espacio (Meta no admite saltos de línea en los parámetros) |
   | `{{3}}` | `empresa`, o `COMPANY_NAME` si el aviso no la trae |
 
-### Dos reglas de Meta que rechazan la plantilla al capturarla
+### Tres reglas de Meta que rechazan la plantilla al capturarla
 
-Ambas se descubrieron en el alta real, no en la documentación:
+Las tres se descubrieron dando de alta la plantilla real, ninguna está en la
+documentación de Meta:
 
 1. **Una variable no puede abrir ni cerrar el cuerpo.** Una primera versión
    empezaba con `*{{1}}*` y terminaba con `_{{3}} · ERP_`; Meta la rechazó por
-   las dos puntas. Por eso el cuerpo de arriba abre con "Tienes un pendiente en
-   el ERP:" y cierra con la invitación a entrar.
+   las dos puntas. Por eso el cuerpo de arriba abre con "Recordatorio de un
+   pendiente…" y cierra con la invitación a entrar.
 2. **Tiene que haber suficiente texto fijo para tantas variables.** Aquella
    versión eran 3 variables en 29 caracteres y Meta contestó "demasiadas
-   variables en relación con su longitud". La de arriba tiene el mismo número de
-   variables sobre ~140 caracteres.
+   variables en relación con su longitud". La de arriba tiene las mismas 3
+   sobre ~220 caracteres.
+3. **El clasificador de categoría lee SOLO el texto fijo, nunca las
+   variables.** Una segunda versión decía "Tienes un pendiente en el ERP: … Entra
+   al ERP para ver el detalle"; Meta abrió *"La categoría no coincide"*,
+   recomendó Marketing y advirtió que sería rechazada. Tres variables colgando
+   de una frase genérica pueden ser cualquier cosa. Se resolvió sin cambiar una
+   línea de código, solo con vocabulario de cuenta existente: "Recordatorio",
+   "registrado a tu nombre", "tu cuenta de usuario", "consultar el estado".
+
+**Nunca aceptar Marketing para salir del paso**, por más que Meta lo recomiende:
+de los mensajes de Marketing la gente puede darse de baja, y Meta les aplica
+límites de frecuencia por usuario. Un vencimiento silenciado por una preferencia
+de mercadotecnia es exactamente lo que este módulo existe para evitar. Si el
+clasificador insiste, se envía como Utility de todas formas —es una heurística
+previa, no el revisor— y si el revisor real la rechaza, se apela explicando que
+es una notificación interna a empleados sobre pendientes de su cuenta.
 
 Si se cambia el texto, cuidar que el ORDEN de los parámetros no se mueva: es el
-que manda `notify_erp_aviso` del chatbot. Reordenarlos exige tocar código y
-volver a desplegar; envolverlos en más texto fijo, no.
+que manda `notify_erp_aviso` del chatbot, y Meta además exige que aparezcan en
+orden ascendente. Reordenarlos exige tocar código y volver a desplegar;
+envolverlos en más texto fijo, no — que es justo como se resolvió la regla 3.
 
 Sin `WHATSAPP_AVISO_TEMPLATE` el chatbot manda **texto libre**. Eso está bien en
 desarrollo y para quien tenga una conversación abierta, pero no es la
@@ -231,18 +252,87 @@ error del proveedor si lo hubo.
 Fuera de la ventana horaria el aviso **se difiere, no se tira**: un vencimiento
 no deja de vencer porque el cron corrió de madrugada.
 
+### `ENVIADO` no siempre quiere decir entregado
+
+Hay una fila que engaña: **estado `ENVIADO`, sin motivo, sin error — y el
+teléfono nunca sonó.** Es la rama de deduplicación del chatbot.
+
+El chatbot marca el `id` del aviso *antes* de intentar el envío, para que dos
+entregas concurrentes no le lleguen dos veces a la misma persona. Cuando ya
+tiene el `id` responde `{"status":"duplicate"}`, y el ERP lo da por bueno a
+propósito: si lo tratara como error, el worker reintentaría para siempre algo
+que sí salió. Pero por esa rama no viene `wamid`, así que la fila queda idéntica
+a una entrega real.
+
+**Cómo distinguirlas:** una entrega real trae `proveedorMsgId` (el `wamid` de
+Meta). Un `ENVIADO` sin id no generó mensaje nuevo. La bandeja ya lo dice con
+todas sus letras en *Motivo / error*:
+
+> Sin id de mensaje: el chatbot lo tomó como repetido y no lo volvió a mandar.
+
+Si aparece sin que nadie haya recibido nada, el `id` quedó sellado en Redis por
+un intento anterior que falló. Dura lo que su TTL (24 h). Para probar antes,
+dispara un aviso **nuevo** — un recordatorio nuevo tiene `id` nuevo — en vez de
+esperar el reintento del que quedó enterrado.
+
+### `(#132001) Template name does not exist in the translation`
+
+Meta rechaza el envío y dice el nombre y el idioma que buscó. Se cierra
+verificando contra la lista real de plantillas de la WABA:
+
+```bash
+curl -s "https://graph.facebook.com/v21.0/<WABA_ID>/message_templates?fields=name,language,status&access_token=<TOKEN>"
+```
+
+Tres causas, en el orden en que conviene descartarlas:
+
+1. **El nombre no es el que crees.** Meta normaliza a minúsculas y guiones
+   bajos al capturar; `WHATSAPP_AVISO_TEMPLATE` tiene que ser ese nombre
+   normalizado, no el que se tecleó en el formulario.
+2. **El idioma no coincide.** `es` y `es_MX` son plantillas distintas para Meta.
+   `WHATSAPP_TEMPLATE_LANGUAGE` debe ser el código exacto con el que se aprobó.
+3. **La plantilla vive en otra WABA.** Si se creó en una cuenta distinta de la
+   dueña de `WHATSAPP_PHONE_NUMBER_ID`, no existe para ese número — el error es
+   el mismo aunque el nombre y el idioma estén bien.
+
+Si el mismo nombre falla con dos idiomas distintos, ya no es el idioma: es (1)
+o (3).
+
+En el primer despliegue fue la (3), y el `curl` la delató de un vistazo: la WABA
+del número contestó con **una sola plantilla, `hello_world` en `en_US`**. Esa es
+la huella de una cuenta recién creada o del número de prueba que Meta regala con
+la app de desarrollador — `erp_aviso` estaba en otro portafolio. Dos apuntes que
+se derivan de ahí:
+
+- Si el `curl` devuelve un error de permisos en vez de la lista, no es que la
+  plantilla no exista: al token le falta `whatsapp_business_management`.
+- Un número de prueba **solo escribe a destinatarios dados de alta a mano**, así
+  que no sirve para avisarle al equipo por más que la plantilla esté aprobada.
+  La salida es mover el bot al número real, no la plantilla al de pruebas.
+
 ---
 
 ## 7. Prender el puente en producción
 
-1. Aprobar la plantilla en Meta y poner `WHATSAPP_AVISO_TEMPLATE` en el chatbot.
+0. **Confirmar que la plantilla está donde el bot la puede ver**, con el `curl`
+   de §6 contra la WABA dueña de `WHATSAPP_PHONE_NUMBER_ID`. Tiene que salir
+   `erp_aviso · es_MX · APPROVED`. Este paso es el 0 y no el 1 porque saltárselo
+   cuesta una tarde: todo lo demás puede estar bien y no llegar nada.
+1. En el chatbot: `WHATSAPP_AVISO_TEMPLATE=erp_aviso`,
+   `WHATSAPP_TEMPLATE_LANGUAGE=es_MX`, y que `WHATSAPP_TOKEN` /
+   `WHATSAPP_PHONE_NUMBER_ID` sean los de **esa** WABA.
 2. Confirmar `BOT_WEBHOOK_URL` y que `BOT_WEBHOOK_SECRET` (ERP) y
-   `ERP_WEBHOOK_SECRET` (chatbot) coinciden.
+   `ERP_WEBHOOK_SECRET` (chatbot) coinciden — son el mismo secreto con dos
+   nombres. Si difieren, el chatbot responde 401 y el aviso queda `FALLIDO`.
 3. Revisar que la gente tenga teléfono capturado: *Usuarios*, o que cada quien
    lo ponga en *Mi perfil*. Ahí mismo se ve a qué número llegarían sus avisos.
-4. Calibrar el catálogo en *Notificaciones → Avisos al equipo*.
+   Si sigue la advertencia ámbar, `AVISOS_WHATSAPP_ENABLED` no llegó al backend.
+4. Calibrar el catálogo en *Notificaciones → Avisos al equipo*. Los tres tipos
+   de calendario vienen activos y sin acotar por rol: le llegan a quien ya
+   recibía la campanita.
 5. `AVISOS_WHATSAPP_ENABLED=true` y redeploy.
-6. Verificar en la bandeja de envíos que los primeros salgan `ENVIADO`.
+6. Verificar en la bandeja de envíos que los primeros salgan `ENVIADO`
+   **con id de mensaje**: un `ENVIADO` sin id no entregó nada (ver §6).
 
 Para probar sin esperar al cron de las 7:30 está `POST /api/v1/calendario/alertas/ejecutar`,
 que es idempotente por día: se puede disparar a mano sin inundar a nadie.
