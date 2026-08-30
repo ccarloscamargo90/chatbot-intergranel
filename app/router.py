@@ -2,10 +2,15 @@
 
 Orden de decisión:
 
-1. Comando explícito (`/ventas`, `/compras`, `/inventario`, `/soporte`, `/menu`).
+1. Comando explícito: un `/comando` (`/ventas`, `/compras`, `/inventario`,
+   `/soporte`, `/menu`) o el id de un botón del menú (`cli_*`, ver `menus.py`).
 2. Sesión activa en el bus (continuidad con el agente del turno anterior).
 3. Clasificación de intención con Claude Haiku (una palabra), con fallback a
    Soporte.
+
+La respuesta es una `Reply` (texto + botones opcionales), no un string: así el
+router puede contestar el menú con la lista interactiva de WhatsApp y los
+agentes pueden colgarle botones de seguimiento a lo que contestan.
 
 Tras decidir el agente, se fija como agente activo en el bus (TTL 30 min) y se
 delega el mensaje a `agent.handle(...)`. Las herramientas `transferir_a_*` de
@@ -26,6 +31,9 @@ from .agents.soporte import SoporteAgent
 from .agents.ventas import VentasAgent
 from .bus import EventBus, get_event_bus
 from .config import get_settings
+from .menus import MENU, accion, menu_cliente, texto_menu
+from .replies import Reply
+from .sesiones import SesionClienteStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +47,6 @@ COMMANDS = {
     "/inventario": "inventario",
     "/soporte": "soporte",
 }
-
-MENU_TEXT = (
-    "¿En qué le puedo ayudar? 🌾\n\n"
-    "• /ventas — precios, cotizaciones y pedidos\n"
-    "• /inventario — existencias y disponibilidad\n"
-    "• /compras — órdenes de compra a proveedores\n"
-    "• /soporte — estado de sus órdenes y atención\n\n"
-    "También puede escribir su consulta directamente y le atenderé."
-)
 
 CLASSIFIER_SYSTEM = (
     "Clasifica el mensaje del usuario de un chatbot de una comercializadora de "
@@ -77,6 +76,7 @@ class Router:
     ) -> None:
         self._bus = bus or get_event_bus()
         self._agents = agents if agents is not None else _build_default_agents(self._bus)
+        self._sesiones = SesionClienteStore(self._bus)
         settings = get_settings()
         self._api_key = settings.anthropic_api_key or None
         self._client: anthropic.AsyncAnthropic | None = None
@@ -88,12 +88,30 @@ class Router:
         return self._client
 
     def _parse_command(self, text: str) -> tuple[str, str] | None:
-        """Si el texto empieza con un comando conocido, devuelve (agente, resto).
+        """Si el mensaje es un comando conocido, devuelve (agente, resto).
 
-        Para `/menu` devuelve ("menu", ""). None si no hay comando."""
-        if not text or not text.startswith("/"):
+        Cuentan como comando dos cosas:
+
+        - Un `/comando` escrito por la persona.
+        - El id de un botón del menú (`cli_*`), que llega como texto desde
+          `main.py`. Un toque es una intención EXACTA, así que salta la
+          clasificación por completo: ir a preguntarle a un modelo qué quiso
+          decir quien ya nos lo dijo sería gastar tiempo para perder precisión.
+
+        Para el menú devuelve ("menu", ""). None si no hay comando."""
+        if not text:
             return None
-        head, _, rest = text.strip().partition(" ")
+        limpio = text.strip()
+
+        if limpio == MENU:
+            return "menu", ""
+        toque = accion(limpio)
+        if toque is not None:
+            return toque.agente, toque.texto
+
+        if not limpio.startswith("/"):
+            return None
+        head, _, rest = limpio.partition(" ")
         cmd = head.lower()
         if cmd == "/menu":
             return "menu", ""
@@ -123,12 +141,22 @@ class Router:
             logger.exception("Error clasificando intención; uso fallback soporte")
             return DEFAULT_AGENT
 
+    async def _menu(self, phone: str) -> Reply:
+        """El menú principal, con las opciones que correspondan a si el cliente
+        ya se identificó o no."""
+        sesion = await self._sesiones.leer(phone)
+        identificado = sesion is not None
+        return Reply(
+            texto=texto_menu(identificado, sesion.cliente if sesion else ""),
+            lista=menu_cliente(identificado),
+        )
+
     async def route(
         self,
         phone: str,
         content: str | list,
         store_text: str | None = None,
-    ) -> str:
+    ) -> Reply:
         """Decide el agente y delega el mensaje. Devuelve la respuesta."""
         text = content if isinstance(content, str) else (store_text or "")
 
@@ -136,7 +164,7 @@ class Router:
         if command is not None:
             agent_name, rest = command
             if agent_name == "menu":
-                return MENU_TEXT
+                return await self._menu(phone)
             # Si el comando trae texto adicional, ese es el mensaje; si no, un saludo.
             content = rest or "Hola"
             store_text = content
@@ -149,4 +177,4 @@ class Router:
         # herramienta transferir_a_* puede cambiarlo durante el handle.
         await self._bus.set_active_agent(phone, agent_name)
         agent = self._agents[agent_name]
-        return await agent.handle(phone, content, store_text)
+        return Reply.coerce(await agent.handle(phone, content, store_text))

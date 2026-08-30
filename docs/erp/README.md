@@ -16,6 +16,27 @@ GET  /api/v1/bot/ordenes/:folio          -> Order | 404
 GET  /api/v1/bot/ordenes?telefono=<E164> -> Order[]
 ```
 
+### Autoservicio del cliente — identificación y consultas propias · implementado en el ERP
+El cliente se identifica con su nombre (o razón social) y su RFC, y a partir de
+ahí consulta LO SUYO con un token de sesión en `X-Bot-Sesion`:
+```
+POST /api/v1/bot/clientes/identificar  -> Identificacion   body: { nombre, rfc, telefono }
+GET  /api/v1/bot/clientes/resumen      -> CustomerSummary
+GET  /api/v1/bot/clientes/deuda        -> CustomerDebt
+GET  /api/v1/bot/clientes/contratos    -> Order[]
+GET  /api/v1/bot/clientes/pedidos      -> CustomerOrder[]
+GET  /api/v1/bot/clientes/facturas     -> CustomerInvoice[]
+POST /api/v1/bot/clientes/cerrar-sesion
+```
+Ninguno recibe un id de cliente: el "de quién" sale siempre de la sesión. Un
+`401` significa una sola cosa —la sesión caducó— y el bot lo traduce a "vuelva a
+identificarse", no a un error técnico.
+
+Igual que los avisos, esto **ya está implementado** en `ERP-INTERGRANEL`
+(`modules/bot/bot-identidad.service.ts` y `bot-clientes.service.ts`), no es una
+referencia por copiar. El contrato completo, incluida una nota honesta sobre qué
+tan fuerte es identificar con un RFC, está en `AUTOSERVICIO_CLIENTES.md`.
+
 ### Ventas — precios, cotizaciones, solicitudes · `bot-ventas.controller.ts`
 ```
 GET  /api/v1/bot/precios/:producto   -> Price | 404
@@ -101,6 +122,10 @@ El contrato completo, la plantilla de Meta y las variables están en
 { "producto": "trigo cristalino", "stock_ton": 200, "umbral_ton": 250,
   "ubicacion": "Silo Querétaro", "estado": "bajo_umbral" }
 ```
+
+Los DTOs del autoservicio del cliente (`Identificacion`, `CustomerSummary`,
+`CustomerDebt`, `CustomerOrder`, `CustomerInvoice`) están en
+`AUTOSERVICIO_CLIENTES.md`.
 
 > **Montos:** los servicios asumen `montoTotal`/`precioTon` como `BigInt` en
 > centavos y los convierten a pesos (`/100`). Ajusta si tu esquema usa `Decimal`.

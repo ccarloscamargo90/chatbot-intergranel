@@ -143,3 +143,99 @@ class ErpAvisoEvent(BaseModel):
     # código, así que la identidad viaja con el mensaje.
     empresa: str | None = None
 
+
+# --------------------------------------------------------------------------- #
+# Autoservicio del cliente: identidad y consultas propias.
+#
+# El cliente se identifica con su nombre (o el de su empresa) y su RFC; el ERP
+# valida el par y devuelve un TOKEN de sesión. A partir de ahí el bot consulta
+# con el token, nunca con el id interno del cliente: si el token se filtra,
+# caduca solo, y el bot no puede pedir los datos de un cliente que no sea el
+# que se identificó.
+# --------------------------------------------------------------------------- #
+class CustomerIdentification(BaseModel):
+    """Respuesta del ERP a un intento de identificación.
+
+    Un intento fallido NO dice si el RFC existe: `motivo` solo distingue entre
+    "no coincide" y las razones que el cliente sí puede corregir (RFC genérico,
+    demasiados intentos). Decir "ese RFC existe pero el nombre no" convertiría
+    el bot en un verificador de RFCs.
+    """
+
+    encontrado: bool
+    cliente: str | None = None       # nombre comercial
+    razon_social: str | None = None
+    rfc: str | None = None
+    token: str | None = None
+    expira_en_segundos: int = 0
+    # no_coincide | rfc_generico | rfc_invalido | bloqueado
+    motivo: str | None = None
+    intentos_restantes: int | None = None
+    espera_minutos: int | None = None
+
+
+class CustomerDebtLine(BaseModel):
+    """Un renglón de la cuenta del cliente: factura, adeudo o nota de crédito."""
+
+    tipo: str  # FACTURA | MANUAL | CREDITO
+    folio: str
+    concepto: str
+    fecha: str | None = None
+    fecha_vencimiento: str | None = None
+    dias_vencido: int | None = None
+    vencida: bool = False
+    importe: float = 0.0
+    cobrado: float = 0.0
+    saldo: float = 0.0
+    estado: str = ""
+
+
+class CustomerDebt(BaseModel):
+    """Estado de cuenta del cliente: totales y renglones."""
+
+    cliente: str
+    moneda: str = "MXN"
+    saldo: float = 0.0
+    saldo_vencido: float = 0.0
+    lineas: list[CustomerDebtLine] = Field(default_factory=list)
+
+
+class CustomerOrder(BaseModel):
+    """Pedido del cliente (folio PED-YYYY-NNNN)."""
+
+    id: str
+    producto: str
+    cantidad: float
+    unidad: str = "ton"
+    total: float | None = None
+    moneda: str = "MXN"
+    estado: str = "pendiente"
+    fecha: str | None = None
+    fecha_entrega_estimada: str | None = None
+    factura: str | None = None
+
+
+class CustomerInvoice(BaseModel):
+    """Factura del cliente (folio FACT-YYYY-NNNN)."""
+
+    id: str
+    fecha: str | None = None
+    fecha_vencimiento: str | None = None
+    total: float = 0.0
+    saldo: float = 0.0
+    moneda: str = "MXN"
+    estado: str = "emitida"
+    contrato: str | None = None
+    uuid: str | None = None
+
+
+class CustomerSummary(BaseModel):
+    """Foto rápida del cliente para armar el menú con contexto."""
+
+    cliente: str
+    moneda: str = "MXN"
+    contratos_activos: int = 0
+    pedidos_abiertos: int = 0
+    facturas_pendientes: int = 0
+    saldo: float = 0.0
+    saldo_vencido: float = 0.0

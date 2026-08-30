@@ -9,7 +9,8 @@ import asyncio
 import pytest
 
 from app.bus import InMemoryEventBus
-from app.router import MENU_TEXT, Router
+from app.menus import CERRAR_SESION, MENU, PRECIOS, SALDO
+from app.router import Router
 
 
 class FakeAgent:
@@ -57,7 +58,7 @@ def test_parse_command_texto_normal():
 def test_route_comando_despacha_a_agente():
     router, agents, bus = _make_router()
     reply = asyncio.run(router.route("521", "/ventas precio de maíz"))
-    assert reply == "[ventas] precio de maíz"
+    assert reply.texto == "[ventas] precio de maíz"
     assert agents["ventas"].calls[0][1] == "precio de maíz"
     # El agente queda como activo para el siguiente turno.
     assert asyncio.run(bus.get_active_agent("521")) == "ventas"
@@ -72,8 +73,54 @@ def test_route_comando_solo_envia_saludo():
 def test_route_menu_no_despacha():
     router, agents, _ = _make_router()
     reply = asyncio.run(router.route("521", "/menu"))
-    assert reply == MENU_TEXT
+    # El menú lo contesta el propio router, con la lista interactiva.
+    assert reply.lista is not None
     assert all(not a.calls for a in agents.values())
+
+
+# ------------------------------ Botones ---------------------------------- #
+def test_boton_menu_devuelve_el_menu():
+    router, agents, _ = _make_router()
+    reply = asyncio.run(router.route("521", MENU))
+    assert reply.lista is not None
+    assert all(not a.calls for a in agents.values())
+
+
+def test_menu_sin_sesion_solo_ofrece_lo_que_no_expone_datos():
+    router, _, _ = _make_router()
+    reply = asyncio.run(router.route("521", MENU))
+    ids = {o.id for o in reply.lista.opciones}
+    assert SALDO not in ids
+    assert CERRAR_SESION not in ids
+
+
+def test_boton_despacha_al_agente_con_su_frase(monkeypatch):
+    router, agents, bus = _make_router()
+
+    async def _boom(text):
+        raise AssertionError("un toque de botón no se clasifica: ya es una intención")
+
+    monkeypatch.setattr(router, "_classify", _boom)
+    asyncio.run(router.route("521", SALDO))
+    assert len(agents["soporte"].calls) == 1
+    assert "saldo" in agents["soporte"].calls[0][1].lower()
+    assert asyncio.run(bus.get_active_agent("521")) == "soporte"
+
+
+def test_boton_de_precios_va_a_ventas(monkeypatch):
+    router, agents, _ = _make_router()
+
+    async def _boom(text):
+        raise AssertionError("un toque de botón no se clasifica")
+
+    monkeypatch.setattr(router, "_classify", _boom)
+    asyncio.run(router.route("521", PRECIOS))
+    assert len(agents["ventas"].calls) == 1
+
+
+def test_id_desconocido_no_es_comando():
+    router, _, _ = _make_router()
+    assert router._parse_command("cli_no_existe") is None
 
 
 # --------------------------- Continuidad de sesión ----------------------- #
