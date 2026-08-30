@@ -15,7 +15,13 @@ class Settings(BaseSettings):
     # --- Claude / Anthropic ---
     anthropic_api_key: str = ""
     # Opus 4.8 es el modelo por defecto. Para alto volumen y menor costo puedes
-    # cambiarlo a "claude-sonnet-4-6" o "claude-haiku-4-5".
+    # cambiarlo a "claude-sonnet-5" o "claude-haiku-4-5".
+    #
+    # El ID lleva versión SIEMPRE: "claude-sonnet" a secas no existe y la API
+    # contesta 404. Ese 404 no se ve en WhatsApp —el except general de
+    # _process_message lo convierte en "Tuvimos un inconveniente técnico"—, así
+    # que un ID mal escrito rompe TODAS las conversaciones y solo se descubre
+    # leyendo logs. Si el bot contesta siempre lo mismo, revisa esto primero.
     claude_model: str = "claude-opus-4-8"
 
     # --- WhatsApp Cloud API (Meta) ---
