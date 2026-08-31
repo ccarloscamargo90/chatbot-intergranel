@@ -32,6 +32,7 @@ from .config import get_settings
 from .models import (
     CustomerDebt,
     CustomerDebtLine,
+    CustomerDocument,
     CustomerIdentification,
     CustomerInvoice,
     CustomerOrder,
@@ -151,6 +152,17 @@ class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def list_customer_invoices(self, token: str) -> list[CustomerInvoice]:
         """Facturas del cliente de la sesión."""
+
+    @abc.abstractmethod
+    async def get_customer_document(
+        self, token: str, tipo: str, folio: str = ""
+    ) -> CustomerDocument | None:
+        """Un documento del cliente de la sesión, con sus bytes.
+
+        `tipo`: factura | factura_xml | contrato | estado_de_cuenta. Los tres
+        primeros exigen folio y se buscan ENTRE LOS DEL CLIENTE. Devuelve None
+        si no existe en su cuenta — que es también la respuesta cuando el folio
+        es de otro, para no confirmar folios ajenos."""
 
     @abc.abstractmethod
     async def close_customer_session(self, token: str) -> None:
@@ -348,6 +360,42 @@ class HTTPERPClient(ERPClient):
         async with self._sesion_client(token) as client:
             resp = await client.get(f"{self._base_url}/bot/clientes/facturas")
             return [CustomerInvoice(**item) for item in self._exigir_sesion(resp).json()]
+
+    async def get_customer_document(
+        self, token: str, tipo: str, folio: str = ""
+    ) -> CustomerDocument | None:
+        # Timeout más largo: el estado de cuenta se genera al vuelo y un PDF de
+        # ochenta renglones no sale en los 15 s de una consulta normal.
+        async with httpx.AsyncClient(
+            timeout=60, headers=self._sesion_headers(token), transport=self._transport
+        ) as client:
+            resp = await client.get(
+                f"{self._base_url}/bot/clientes/documentos/{tipo}",
+                params={"folio": folio} if folio else None,
+            )
+            if resp.status_code == 404:
+                return None
+            self._exigir_sesion(resp)
+            return CustomerDocument(
+                nombre=self._nombre_adjunto(resp, tipo, folio),
+                tipo_mime=resp.headers.get("content-type", "application/pdf").split(";")[0],
+                contenido=resp.content,
+            )
+
+    @staticmethod
+    def _nombre_adjunto(resp: httpx.Response, tipo: str, folio: str) -> str:
+        """El filename del Content-Disposition, o uno armado si no viene.
+
+        Importa más de lo que parece: es el nombre con el que le queda guardado
+        el archivo al cliente en su teléfono.
+        """
+        disposicion = resp.headers.get("content-disposition", "")
+        if "filename=" in disposicion:
+            nombre = disposicion.split("filename=", 1)[1].strip().strip('"').strip("'")
+            if nombre:
+                return nombre
+        extension = "xml" if tipo == "factura_xml" else "pdf"
+        return f"{folio or tipo}.{extension}"
 
     async def close_customer_session(self, token: str) -> None:
         async with self._sesion_client(token) as client:
@@ -750,6 +798,40 @@ class MockERPClient(ERPClient):
     async def list_customer_invoices(self, token: str) -> list[CustomerInvoice]:
         self._sesion(token)
         return list(_MOCK_FACTURAS)
+
+    async def get_customer_document(
+        self, token: str, tipo: str, folio: str = ""
+    ) -> CustomerDocument | None:
+        self._sesion(token)
+        buscado = folio.strip().upper()
+
+        if tipo == "estado_de_cuenta":
+            return CustomerDocument(
+                nombre=f"estado-de-cuenta-{_MOCK_CLIENTE['rfc']}.pdf",
+                tipo_mime="application/pdf",
+                contenido=b"%PDF-1.4 estado de cuenta simulado",
+            )
+
+        if tipo in ("factura", "factura_xml"):
+            if not any(f.id == buscado for f in _MOCK_FACTURAS):
+                return None
+            extension = "xml" if tipo == "factura_xml" else "pdf"
+            return CustomerDocument(
+                nombre=f"{buscado}.{extension}",
+                tipo_mime="application/xml" if extension == "xml" else "application/pdf",
+                contenido=f"documento simulado {buscado}".encode(),
+            )
+
+        if tipo == "contrato":
+            if buscado not in self._orders:
+                return None
+            return CustomerDocument(
+                nombre=f"{buscado}.pdf",
+                tipo_mime="application/pdf",
+                contenido=f"contrato simulado {buscado}".encode(),
+            )
+
+        return None
 
     async def close_customer_session(self, token: str) -> None:
         self._sesiones.pop(token, None)

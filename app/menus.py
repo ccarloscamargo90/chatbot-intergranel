@@ -32,6 +32,7 @@ FACTURAS = "cli_facturas"
 PRECIOS = "cli_precios"
 ASESOR = "cli_asesor"
 IDENTIFICARME = "cli_identificarme"
+ESTADO_CUENTA = "cli_estado_cuenta"
 CERRAR_SESION = "cli_cerrar_sesion"
 
 
@@ -49,6 +50,9 @@ ACCIONES: dict[str, Accion] = {
     PEDIDOS: Accion("soporte", "Quiero ver el estado de mis pedidos."),
     CONTRATOS: Accion("soporte", "Quiero ver mis contratos."),
     SALDO: Accion("soporte", "Quiero ver mi saldo y lo que tengo vencido."),
+    ESTADO_CUENTA: Accion(
+        "soporte", "Mándame mi estado de cuenta en PDF."
+    ),
     FACTURAS: Accion("soporte", "Quiero ver mis facturas."),
     IDENTIFICARME: Accion("soporte", "Quiero identificarme para ver mi información."),
     CERRAR_SESION: Accion("soporte", "Quiero cerrar mi sesión."),
@@ -68,6 +72,7 @@ _OPCIONES_IDENTIFICADO = [
     OpcionLista(CONTRATOS, "📄 Mis contratos", "Contratos y avance de entregas"),
     OpcionLista(SALDO, "💰 Mi saldo", "Lo que debo y lo que está vencido"),
     OpcionLista(FACTURAS, "🧾 Mis facturas", "Folios, montos y estado de cobro"),
+    OpcionLista(ESTADO_CUENTA, "📄 Estado de cuenta", "Se lo mando en PDF"),
     OpcionLista(PRECIOS, "🌾 Precios del día", "Precios vigentes por tonelada"),
     OpcionLista(ASESOR, "👤 Hablar con asesor", "Le pasamos con una persona"),
     OpcionLista(CERRAR_SESION, "🔒 Cerrar sesión", "Deja de mostrar mi información"),

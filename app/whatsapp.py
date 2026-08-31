@@ -34,7 +34,8 @@ class WhatsAppClient:
         settings = get_settings()
         self._token = settings.whatsapp_token
         self._graph = f"https://graph.facebook.com/{settings.whatsapp_api_version}"
-        self._url = f"{self._graph}/{settings.whatsapp_phone_number_id}/messages"
+        self._phone_number_id = settings.whatsapp_phone_number_id
+        self._url = f"{self._graph}/{self._phone_number_id}/messages"
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -157,6 +158,60 @@ class WhatsAppClient:
         except Exception:  # noqa: BLE001 - degradar a texto, nunca callar
             logger.exception("Falló el mensaje interactivo a %s; se manda como texto", to)
             return await self.send_text(to, reply.texto)
+
+    async def upload_media(
+        self, contenido: bytes, filename: str, mime_type: str
+    ) -> str:
+        """Sube un archivo a la Media API de Meta y devuelve su `media_id`.
+
+        Es el paso previo a `send_document`. La alternativa sería mandarle a
+        Meta un `link` público para que lo baje, pero eso obliga a publicar —
+        aunque sea unos minutos, aunque sea firmada— una URL desde la que
+        cualquiera puede bajar la factura de un cliente. Subiendo los bytes,
+        esa URL no existe nunca.
+
+        El id vive 30 días del lado de Meta; aquí se usa de inmediato.
+        """
+        if not self._token:
+            logger.info("[WhatsApp DEV] upload_media %s (%s bytes)", filename, len(contenido))
+            return f"dev-media-{filename}"
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self._graph}/{self._phone_number_id}/media",
+                headers={"Authorization": f"Bearer {self._token}"},
+                data={"messaging_product": "whatsapp", "type": mime_type},
+                files={"file": (filename, contenido, mime_type)},
+            )
+            if resp.status_code >= 400:
+                logger.error("Error subiendo media %s: %s", resp.status_code, resp.text)
+            resp.raise_for_status()
+            return resp.json()["id"]
+
+    async def send_document(
+        self,
+        to: str,
+        media_id: str,
+        filename: str,
+        caption: str = "",
+    ) -> dict[str, Any]:
+        """Manda un documento ya subido, por su `media_id`.
+
+        `filename` es lo que el cliente ve y lo que le queda guardado en el
+        teléfono: mandar "FACT-2026-0031.pdf" y no "documento.pdf" es la
+        diferencia entre que lo encuentre después y que no.
+        """
+        documento: dict[str, Any] = {"id": media_id, "filename": filename[:240]}
+        if caption:
+            documento["caption"] = caption[:1024]
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "document",
+                "document": documento,
+            }
+        )
 
     async def send_template(
         self,

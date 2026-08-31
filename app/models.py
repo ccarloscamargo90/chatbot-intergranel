@@ -289,3 +289,16 @@ class ChatwootEvent(BaseModel):
     @property
     def conversacion_resuelta(self) -> bool:
         return self.event == "conversation_status_changed" and self.status == "resolved"
+
+
+class CustomerDocument(BaseModel):
+    """Un documento del cliente, con sus bytes.
+
+    Viaja con el contenido y no con una URL a propósito: el bot lo sube a la
+    Media API de Meta, así que en ningún momento existe un enlace desde el que
+    se pueda bajar la factura de un cliente.
+    """
+
+    nombre: str
+    tipo_mime: str
+    contenido: bytes
