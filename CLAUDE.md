@@ -36,7 +36,8 @@ app/
     inventario.py       ← Funcional vía ERP, con alertas proactivas
     soporte.py          ← Atención al cliente + autoservicio (identificación por RFC)
   assistant.py          ← Wrapper compat para tests legacy
-  fletes.py             ← Cotización de fletes: salida al transportista e
+  errores.py           ← El motivo REAL de un fallo HTTP (Meta o ERP), no el status
+  fletes.py            ← Cotización de fletes: salida al transportista e
                           interpretación de su respuesta (ERP · BUG-77)
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
 tests/
@@ -44,7 +45,7 @@ tests/
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
-  test_chatwoot.py, test_fletes.py
+  test_chatwoot.py, test_documentos.py, test_fletes.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -154,6 +155,40 @@ Tres cosas que conviene no romper:
 Los tipos válidos viven en tres lados que tienen que coincidir —`TIPOS_DOCUMENTO`,
 el `enum` de la tool y el ERP—; `test_documentos.py` falla si se separan.
 
+### El MIME que Meta acepta no es el MIME del archivo
+
+La lista de tipos de documento de Meta es **cerrada** y `application/xml` no
+está en ella: PDF, los de Office y `text/plain`. Un XML subido con su MIME real
+hace que la Media API rechace el archivo y no salga nada. `MIME_PARA_META`
+(en `whatsapp.py`) lo traduce a `text/plain` conservando el nombre `.xml`, que
+es lo que decide la extensión con la que le queda guardado al cliente.
+
+Esto no lo veían las pruebas: mockeaban a Meta, y un mock acepta cualquier MIME.
+Por eso `WhatsAppClient` ahora recibe un `transport` inyectable, como
+`HTTPERPClient` — sin él, de un envío solo se puede probar el modo desarrollo.
+
+### Cuando un documento no sale, el motivo importa
+
+`enviar_mi_documento` devuelve `enviado: false` con un `motivo` distinto por
+causa, y el prompt tiene prohibido mezclarlos:
+
+| `motivo` | Qué pasó |
+|---|---|
+| `no_esta_en_su_cuenta` | No es suyo (o no existe: no se distinguen, a propósito) |
+| `sin_archivo_cargado` | **Sí** es suyo, pero nadie subió el archivo al ERP |
+| `archivo_no_recuperable` | Es suyo, hay archivo, el ERP no lo pudo bajar |
+| `fallo_al_enviar` | El documento salió del ERP y Meta lo rechazó |
+
+La distinción no es cosmética. Con un solo motivo para todo, el bot le dijo a un
+cliente que sus facturas no aparecían en su cuenta —las que acababa de listarle—
+y, ante la contradicción, inventó una causa: *"es el módulo de envío el que no
+las está entregando"*. Lo que devuelve una tool es lo único que el modelo tiene
+para contestar: si el motivo va mudo, el modelo rellena el hueco.
+
+De ahí también que `errores.py` (`detalle_http` / `detalle_respuesta`) sea
+compartido: `str(HTTPStatusError)` dice el status y tira el mensaje del ERP o de
+Meta, que es el único que explica algo. Estaba resuelto solo para los avisos.
+
 ## Handoff a un asesor humano (app/chatwoot.py, app/handoff.py)
 
 Cuando el cliente pide una persona, `escalar_a_humano` abre una conversación en
@@ -207,7 +242,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 243 tests pasando
+pytest -q                  # 249 tests pasando
 ```
 
 ## Estado actual y fases

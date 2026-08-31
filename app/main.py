@@ -14,6 +14,7 @@ from .chatwoot import ChatwootNoDisponible, get_chatwoot_client
 from .config import get_settings
 from .dedup import get_dedup_store
 from .erp import get_erp_client
+from .errores import detalle_http
 from .fletes import (
     FletesPendientes,
     acuse,
@@ -375,20 +376,11 @@ def _detalle_error(exc: Exception) -> str:
     ("template name (erp_aviso) does not exist in es_MX"). Sin esto el ERP solo
     ve "Request failed with status code 500" y hay que ir a leer logs — que es
     justo lo que la bandeja de avisos existe para evitar.
+
+    La mecánica vive en `errores.detalle_http`: el envío de documentos al
+    cliente necesitaba exactamente lo mismo y estaba resuelto solo aquí.
     """
-    respuesta = getattr(exc, "response", None)
-    if respuesta is not None:
-        try:
-            error = respuesta.json().get("error", {})
-        except Exception:  # noqa: BLE001 - el cuerpo puede no ser JSON
-            error = {}
-        detalle = (error.get("error_data") or {}).get("details")
-        mensaje = error.get("message")
-        partes = [p for p in (mensaje, detalle) if p]
-        if partes:
-            return f"Meta {respuesta.status_code}: {' · '.join(partes)}"
-        return f"Meta {respuesta.status_code}: {respuesta.text[:300]}"
-    return f"{type(exc).__name__}: {exc}"
+    return detalle_http(exc, "Meta")
 
 
 @app.post("/webhooks/erp/notificacion")
