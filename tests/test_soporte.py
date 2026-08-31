@@ -8,23 +8,9 @@ identificarse y qué dejó de poderse.
 import asyncio
 import json
 
-import pytest
-
-from app.agents.soporte import TOOLS, TOOLS_CON_SESION, SoporteAgent
-from app.bus import InMemoryEventBus
-from app.erp import MockERPClient
-from app.sesiones import SesionClienteStore
+from app.agents.soporte import TOOLS, TOOLS_CON_SESION
 
 PHONE = "5215512345678"
-
-
-@pytest.fixture
-def soporte() -> SoporteAgent:
-    agente = SoporteAgent.__new__(SoporteAgent)
-    agente._erp = MockERPClient()
-    agente._bus = InMemoryEventBus()
-    agente._sesiones = SesionClienteStore(agente._bus)
-    return agente
 
 
 def _run(agent, name, payload=None):

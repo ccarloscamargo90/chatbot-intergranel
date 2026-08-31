@@ -27,6 +27,8 @@ app/
   replies.py           ← Reply/Boton/MenuLista: texto + botones, con los topes de Meta
   menus.py             ← Menú del autoservicio del cliente e ids `cli_*` → acción
   sesiones.py          ← Sesión del cliente identificado, sobre el bus
+  chatwoot.py          ← Bandeja del asesor humano (abstracto + HTTP + mock)
+  handoff.py           ← Quién está con un asesor y no con el bot
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
     ventas.py           ← Funcional, precios/cotizaciones vía ERP
@@ -39,10 +41,13 @@ tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
-  test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py
+  test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
+  test_chatwoot.py
+  conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
                           (AUTOSERVICIO_CLIENTES.md)
+docs/CHATWOOT_HANDOFF.md ← Handoff a un asesor: qué crear en Chatwoot y por qué
 ```
 
 ## Arquitectura del router
@@ -124,6 +129,34 @@ agente nunca se entera de que hubo un botón.
 Al agregar una opción al menú: id nuevo en `menus.py`, entrada en `ACCIONES`, y
 listo. `test_botones.py` falla si un id del menú se queda sin acción.
 
+## Handoff a un asesor humano (app/chatwoot.py, app/handoff.py)
+
+Cuando el cliente pide una persona, `escalar_a_humano` abre una conversación en
+Chatwoot con una nota privada de contexto, marca el teléfono en handoff y el bot
+**deja de contestar**. Lo que escriba el cliente se reenvía a la bandeja; lo que
+escriba el asesor sale por WhatsApp vía `POST /webhooks/chatwoot`. Al resolver la
+conversación, el bot retoma.
+
+**El bot conserva el número de WhatsApp**, no se le cede a Chatwoot. Chatwoot no
+manda mensajes interactivos por la Cloud API, así que cederle el número cambiaría
+los menús de botones por texto plano en TODAS las conversaciones para ganar
+comodidad solo en las que llegan a un asesor.
+
+Cuatro cosas que el código cuida y conviene no romper:
+
+- **No hacer eco.** Solo se relaya lo `outgoing` y no privado; lo demás es lo que
+  el propio bot publicó y devolvérselo al cliente sería un bucle.
+- **No duplicar.** Se deduplica por id de mensaje, y si el envío falla se suelta
+  el candado para que el reintento de Chatwoot sirva.
+- **No dar por entregado lo que Meta rechazó.** Fuera de la ventana de 24 h el
+  texto libre se cae; el fallo se escribe como nota privada en la bandeja, que es
+  donde el asesor lo va a ver.
+- **No prometer un asesor que nadie avisó.** Si Chatwoot no está configurado o
+  falla, `escalar_a_humano` devuelve `escalado: false` y el prompt tiene prohibido
+  decir que alguien lo contactará.
+
+Contrato completo y qué crear en la instancia: `docs/CHATWOOT_HANDOFF.md`.
+
 ## Transferencias entre agentes
 
 Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agente activo en el bus. El siguiente mensaje del usuario llega automáticamente al nuevo agente.
@@ -149,7 +182,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 186 tests pasando
+pytest -q                  # 207 tests pasando
 ```
 
 ## Estado actual y fases
@@ -289,7 +322,7 @@ Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,4
 | listar_mis_facturas | — | ✔ | Facturas con monto, saldo y estado |
 | consultar_orden | order_id | ✔ | Un contrato **de los suyos**, por folio |
 | cerrar_sesion | — | ✔ | Deja de mostrar su información |
-| escalar_a_humano | motivo | — | Log + mensaje de escalamiento |
+| escalar_a_humano | motivo | — | Abre la conversación en Chatwoot y pasa el teléfono a handoff |
 
 Las tools marcadas con ✔ están declaradas en `TOOLS_CON_SESION`: sin sesión
 devuelven `identificado: false` y el agente pide identificarse. Freno local de
@@ -351,6 +384,10 @@ WHATSAPP_AVISO_TEMPLATE (vacío = texto libre; obligatoria en producción)
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
 COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
 INVENTORY_ALERT_PHONES (vacío = solo log+bus; lista separada por comas)
+CHATWOOT_BASE_URL (vacío = escalamiento deshabilitado; "mock" = simulado)
+CHATWOOT_API_TOKEN, CHATWOOT_ACCOUNT_ID, CHATWOOT_INBOX_ID
+CHATWOOT_WEBHOOK_SECRET (obligatorio en producción: Chatwoot no firma)
+HANDOFF_TTL_SECONDS (8h; al vencer el bot retoma)
 ```
 
 El autoservicio del cliente no agrega variables aquí: sus topes (intentos,

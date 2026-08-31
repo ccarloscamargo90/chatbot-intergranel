@@ -1,7 +1,7 @@
 """Autoservicio del cliente: identificación por nombre + RFC y consultas.
 
-Sin red ni Claude: el agente se arma con `__new__` y se le inyectan el ERP
-simulado y un store de sesiones sobre un bus en memoria.
+Sin red ni Claude: el agente lo arma la fixture `soporte` de `conftest.py`, con
+el ERP y Chatwoot simulados sobre un bus en memoria.
 """
 
 import asyncio
@@ -9,25 +9,14 @@ import json
 
 import pytest
 
-from app.agents.soporte import SoporteAgent
-from app.bus import InMemoryEventBus
-from app.erp import MockERPClient, SesionClienteInvalida
+from app.erp import SesionClienteInvalida
 from app.menus import ASESOR, MENU
-from app.sesiones import MAX_INTENTOS_LOCALES, SesionClienteStore
+from app.sesiones import MAX_INTENTOS_LOCALES
 
 PHONE = "5215512345678"
 OTRO_PHONE = "5215599999999"
 NOMBRE = "Molinos del Bajío"
 RFC = "MBA950101AB1"
-
-
-@pytest.fixture
-def soporte() -> SoporteAgent:
-    agente = SoporteAgent.__new__(SoporteAgent)
-    agente._erp = MockERPClient()
-    agente._bus = InMemoryEventBus()
-    agente._sesiones = SesionClienteStore(agente._bus)
-    return agente
 
 
 def _run(agent, name, payload=None, phone=PHONE):
