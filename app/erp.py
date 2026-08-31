@@ -37,6 +37,7 @@ from .models import (
     CustomerIdentification,
     CustomerInvoice,
     CustomerOrder,
+    CustomerQuote,
     CustomerSummary,
     DepositoRespuestaFlete,
     InterpretacionFlete,
@@ -175,6 +176,14 @@ class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def list_customer_invoices(self, token: str) -> list[CustomerInvoice]:
         """Facturas del cliente de la sesión."""
+
+    @abc.abstractmethod
+    async def list_customer_quotes(self, token: str) -> list[CustomerQuote]:
+        """Cotizaciones formales del cliente de la sesión.
+
+        NO incluye las que están en borrador: son el precio con el que el
+        vendedor todavía está trabajando y que el cliente no ha recibido.
+        Listarlas se las convertiría en una oferta que nadie le hizo."""
 
     @abc.abstractmethod
     async def get_customer_document(
@@ -404,6 +413,11 @@ class HTTPERPClient(ERPClient):
             resp = await client.get(f"{self._base_url}/bot/clientes/facturas")
             return [CustomerInvoice(**item) for item in self._exigir_sesion(resp).json()]
 
+    async def list_customer_quotes(self, token: str) -> list[CustomerQuote]:
+        async with self._sesion_client(token) as client:
+            resp = await client.get(f"{self._base_url}/bot/clientes/cotizaciones")
+            return [CustomerQuote(**item) for item in self._exigir_sesion(resp).json()]
+
     async def get_customer_document(
         self, token: str, tipo: str, folio: str = ""
     ) -> CustomerDocument | None:
@@ -590,6 +604,34 @@ _MOCK_FACTURAS = [
         total=92000.0,
         saldo=92000.0,
         estado="emitida",
+        contrato="CONT-2026-0002",
+    ),
+]
+
+_MOCK_COTIZACIONES = [
+    CustomerQuote(
+        id="COT-2026-0007",
+        fecha="2026-05-02",
+        vigencia_hasta="2099-05-16",
+        producto="Maíz amarillo",
+        toneladas=50.0,
+        precio_ton=5200.0,
+        total=260000.0,
+        estado="enviada",
+        vencida=False,
+    ),
+    CustomerQuote(
+        id="COT-2026-0003",
+        fecha="2026-03-11",
+        vigencia_hasta="2026-03-25",
+        producto="Trigo suave",
+        toneladas=30.0,
+        precio_ton=7100.0,
+        total=213000.0,
+        estado="aceptada",
+        # Vencida y convertida en contrato: el caso que más confunde al modelo
+        # si no se le dice masticado que ese precio ya no está vivo.
+        vencida=True,
         contrato="CONT-2026-0002",
     ),
 ]
@@ -880,6 +922,10 @@ class MockERPClient(ERPClient):
         self._sesion(token)
         return list(_MOCK_FACTURAS)
 
+    async def list_customer_quotes(self, token: str) -> list[CustomerQuote]:
+        self._sesion(token)
+        return list(_MOCK_COTIZACIONES)
+
     async def get_customer_document(
         self, token: str, tipo: str, folio: str = ""
     ) -> CustomerDocument | None:
@@ -910,6 +956,15 @@ class MockERPClient(ERPClient):
                 nombre=f"{buscado}.{extension}",
                 tipo_mime="application/xml" if extension == "xml" else "application/pdf",
                 contenido=f"documento simulado {buscado}".encode(),
+            )
+
+        if tipo == "cotizacion":
+            if not any(c.id == buscado for c in _MOCK_COTIZACIONES):
+                return None
+            return CustomerDocument(
+                nombre=f"{buscado}.pdf",
+                tipo_mime="application/pdf",
+                contenido=f"%PDF-1.4 cotizacion simulada {buscado}".encode(),
             )
 
         if tipo == "contrato":

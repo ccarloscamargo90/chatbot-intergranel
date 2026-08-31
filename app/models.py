@@ -229,6 +229,27 @@ class CustomerInvoice(BaseModel):
     uuid: str | None = None
 
 
+class CustomerQuote(BaseModel):
+    """Cotización formal del cliente (folio COT-YYYY-NNNN).
+
+    `vencida` viene calculada del ERP a propósito: si el modelo tuviera que
+    deducir de una fecha si un precio sigue vigente, tarde o temprano le
+    ofrecería al cliente uno que ya caducó.
+    """
+
+    id: str
+    fecha: str | None = None
+    vigencia_hasta: str | None = None
+    producto: str = ""
+    toneladas: float = 0.0
+    precio_ton: float = 0.0
+    total: float = 0.0
+    moneda: str = "MXN"
+    estado: str = "enviada"
+    vencida: bool = False
+    contrato: str | None = None
+
+
 class CustomerSummary(BaseModel):
     """Foto rápida del cliente para armar el menú con contexto."""
 

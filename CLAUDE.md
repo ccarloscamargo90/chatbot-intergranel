@@ -135,7 +135,7 @@ listo. `test_botones.py` falla si un id del menú se queda sin acción.
 ## Documentos al cliente (tool `enviar_mi_documento`)
 
 El cliente identificado puede pedir su factura (PDF **y** XML), su contrato
-firmado o su estado de cuenta, y le llegan por WhatsApp.
+firmado, su **cotización** o su estado de cuenta, y le llegan por WhatsApp.
 
 Los bytes van del ERP al bot y del bot a la Media API de Meta
 (`WhatsAppClient.upload_media` → `send_document` por `media_id`). **Nunca se
@@ -154,6 +154,28 @@ Tres cosas que conviene no romper:
 
 Los tipos válidos viven en tres lados que tienen que coincidir —`TIPOS_DOCUMENTO`,
 el `enum` de la tool y el ERP—; `test_documentos.py` falla si se separan.
+
+### Cotizaciones: el borrador NO sale, y el precio vencido se anuncia
+
+Hay **dos** cosas que se llaman cotización y no son la misma: `Cotizacion` en el
+ERP es el documento formal pre-contrato (cliente, vendedor, grano, toneladas,
+precio, vigencia, y `convertirAContrato` cuando se acepta); `BotCotizacion` es
+la consulta de precio suelta que el agente de Ventas guarda por teléfono. La que
+se manda por WhatsApp es la **formal**.
+
+Dos reglas que conviene no romper:
+
+- **Las BORRADOR no se listan ni se mandan.** Un borrador es el precio con el
+  que el vendedor todavía está trabajando —lo sube, lo baja, revisa margen— y
+  que el cliente no ha recibido. Entregárselo le pone en la mano una oferta que
+  la empresa no ha hecho. Un borrador cae en el mismo "no aparece en su cuenta"
+  que un folio ajeno: decir "sí es suya pero está en borrador" delataría que le
+  están preparando algo.
+- **`vencida` viene calculada del ERP**, no se deduce de la fecha. Si el modelo
+  tuviera que comparar `vigencia_hasta` contra hoy para saber si un precio sigue
+  vivo, tarde o temprano ofrecería uno caducado. El PDF también lo marca, en
+  rojo. El grano se mueve de precio y el cliente hace cuentas con lo que se le
+  diga.
 
 ### El MIME que Meta acepta no es el MIME del archivo
 
@@ -350,6 +372,7 @@ Endpoints que el ERP expone (ya implementados en `ERP-INTERGRANEL`):
 - `GET /api/v1/bot/clientes/contratos` → `Order[]`
 - `GET /api/v1/bot/clientes/pedidos` → `CustomerOrder[]`
 - `GET /api/v1/bot/clientes/facturas` → `CustomerInvoice[]`
+- `GET /api/v1/bot/clientes/cotizaciones` → `CustomerQuote[]` (sin BORRADOR)
 - `GET /api/v1/bot/clientes/documentos/:tipo?folio=` → los bytes del archivo
 - `POST /api/v1/bot/clientes/cerrar-sesion`
 
@@ -434,7 +457,8 @@ Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,4
 | listar_mis_pedidos | — | ✔ | Pedidos con estado y fecha de entrega |
 | listar_mis_facturas | — | ✔ | Facturas con monto, saldo y estado |
 | consultar_orden | order_id | ✔ | Un contrato **de los suyos**, por folio |
-| enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato o su estado de cuenta |
+| listar_mis_cotizaciones | — | ✔ | Cotizaciones con precio, vigencia y si ya venció |
+| enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato, su cotización o su estado de cuenta |
 | cerrar_sesion | — | ✔ | Deja de mostrar su información |
 | escalar_a_humano | motivo | — | Abre la conversación en Chatwoot y pasa el teléfono a handoff |
 

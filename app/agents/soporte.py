@@ -78,6 +78,11 @@ que existe pero es de alguien más. Lo mismo con `enviar_mi_documento`.
 - Cuando el cliente pida una factura, mándale el PDF **y** el XML (dos llamadas \
 a `enviar_mi_documento`): el PDF es el legible, el XML es el que vale \
 fiscalmente y el que necesita su contador. Solo manda uno si lo pidió así.
+- Una cotización con `vencida: true` YA NO ES UN PRECIO. Puedes mandársela \
+(es un documento suyo y tiene derecho a verlo), pero di con claridad que esa \
+vigencia ya pasó y ofrece pedirle a un asesor un precio actualizado. Nunca \
+presentes un precio vencido como si siguiera disponible: el grano se mueve y \
+el cliente hace cuentas con lo que le digas.
 - Los documentos ya salieron cuando la herramienta responde `enviado: true`: no \
 digas "se lo voy a enviar", di que ya se lo mandaste, en una línea.
 - Si `enviar_mi_documento` responde `enviado: false`, la razón está en `motivo` y \
@@ -115,7 +120,7 @@ emoji con moderación.
 
 # Documentos que el cliente puede pedir. Es el mismo enum que declara la tool
 # (ver TOOLS) y el mismo que acepta el ERP; si se agrega uno, va en los tres.
-TIPOS_DOCUMENTO = {"factura", "factura_xml", "contrato", "estado_de_cuenta"}
+TIPOS_DOCUMENTO = {"factura", "factura_xml", "contrato", "cotizacion", "estado_de_cuenta"}
 
 # Los datos de la cuenta y el cierre de sesión exigen estar identificado.
 TOOLS_CON_SESION = {
@@ -124,6 +129,7 @@ TOOLS_CON_SESION = {
     "listar_mis_contratos",
     "listar_mis_pedidos",
     "listar_mis_facturas",
+    "listar_mis_cotizaciones",
     "consultar_orden",
     "enviar_mi_documento",
     "cerrar_sesion",
@@ -200,6 +206,16 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "listar_mis_cotizaciones",
+        "description": (
+            "Cotizaciones del cliente identificado, con folio, producto, "
+            "toneladas, precio por tonelada, total y hasta cuándo son vigentes. "
+            "El campo `vencida` dice si el precio ya caducó: si es true, NO se "
+            "lo ofrezcas como precio actual."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "consultar_orden",
         "description": (
             "Detalle de UN contrato del cliente identificado, por su folio "
@@ -235,7 +251,13 @@ TOOLS = [
             "properties": {
                 "tipo": {
                     "type": "string",
-                    "enum": ["factura", "factura_xml", "contrato", "estado_de_cuenta"],
+                    "enum": [
+                        "factura",
+                        "factura_xml",
+                        "contrato",
+                        "cotizacion",
+                        "estado_de_cuenta",
+                    ],
                     "description": "Qué documento enviar.",
                 },
                 "folio": {
@@ -424,6 +446,14 @@ class SoporteAgent(BaseAgent):
                 "identificado": True,
                 "total": len(facturas),
                 "facturas": [f.model_dump() for f in facturas],
+            }
+
+        if name == "listar_mis_cotizaciones":
+            cotizaciones = await self._erp.list_customer_quotes(token)
+            return {
+                "identificado": True,
+                "total": len(cotizaciones),
+                "cotizaciones": [c.model_dump() for c in cotizaciones],
             }
 
         if name == "enviar_mi_documento":
