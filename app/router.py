@@ -27,6 +27,7 @@ import anthropic
 from .agents.base import BaseAgent
 from .agents.compras import ComprasAgent
 from .agents.inventario import InventarioAgent
+from .agents.proveedores import ProveedoresAgent
 from .agents.soporte import SoporteAgent
 from .agents.ventas import VentasAgent
 from .bus import EventBus, get_event_bus
@@ -46,6 +47,7 @@ COMMANDS = {
     "/compras": "compras",
     "/inventario": "inventario",
     "/soporte": "soporte",
+    "/proveedor": "proveedores",
 }
 
 CLASSIFIER_SYSTEM = (
@@ -58,6 +60,13 @@ CLASSIFIER_SYSTEM = (
     "Responde únicamente con: ventas, compras, inventario o soporte."
 )
 
+# `proveedores` NO es una categoría del clasificador a propósito. Un modelo
+# no puede distinguir por el texto si quien pregunta "¿cuándo me pagan?" es
+# un proveedor o un cliente pidiendo su nota de crédito, y equivocarse ahí
+# manda a alguien a identificarse contra el padrón que no es. Se entra por
+# el botón "🚚 Soy proveedor" o por /proveedor: intenciones exactas.
+# Soporte, que es el fallback, sabe ofrecer esa puerta.
+
 
 def _build_default_agents(bus: EventBus) -> dict[str, BaseAgent]:
     return {
@@ -65,6 +74,7 @@ def _build_default_agents(bus: EventBus) -> dict[str, BaseAgent]:
         "compras": ComprasAgent(bus=bus),
         "inventario": InventarioAgent(bus=bus),
         "soporte": SoporteAgent(bus=bus),
+        "proveedores": ProveedoresAgent(bus=bus),
     }
 
 

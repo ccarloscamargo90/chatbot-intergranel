@@ -29,11 +29,21 @@ PEDIDOS = "cli_pedidos"
 CONTRATOS = "cli_contratos"
 SALDO = "cli_saldo"
 FACTURAS = "cli_facturas"
+COTIZACIONES = "cli_cotizaciones"
 PRECIOS = "cli_precios"
 ASESOR = "cli_asesor"
 IDENTIFICARME = "cli_identificarme"
 ESTADO_CUENTA = "cli_estado_cuenta"
 CERRAR_SESION = "cli_cerrar_sesion"
+
+# Los del PROVEEDOR llevan su propio prefijo `prov_`: son otra audiencia, con
+# otra sesión, y mezclar los ids haría que un toque abriera lo que no es.
+PROV_SOY_PROVEEDOR = "prov_identificarme"
+PROV_PAGOS = "prov_pagos"
+PROV_FACTURAS = "prov_facturas"
+PROV_ORDENES = "prov_ordenes"
+PROV_COMPRADOR = "prov_comprador"
+PROV_CERRAR_SESION = "prov_cerrar_sesion"
 
 
 @dataclass(frozen=True)
@@ -54,10 +64,20 @@ ACCIONES: dict[str, Accion] = {
         "soporte", "Mándame mi estado de cuenta en PDF."
     ),
     FACTURAS: Accion("soporte", "Quiero ver mis facturas."),
+    COTIZACIONES: Accion("soporte", "Quiero ver mis cotizaciones."),
     IDENTIFICARME: Accion("soporte", "Quiero identificarme para ver mi información."),
     CERRAR_SESION: Accion("soporte", "Quiero cerrar mi sesión."),
     ASESOR: Accion("soporte", "Quiero hablar con un asesor humano."),
     PRECIOS: Accion("ventas", "¿Cuáles son los precios vigentes?"),
+    # --- Proveedor ---
+    PROV_SOY_PROVEEDOR: Accion(
+        "proveedores", "Soy proveedor y quiero consultar mis pagos."
+    ),
+    PROV_PAGOS: Accion("proveedores", "¿Cuánto me deben y qué está vencido?"),
+    PROV_FACTURAS: Accion("proveedores", "Quiero ver mis facturas y su saldo."),
+    PROV_ORDENES: Accion("proveedores", "Quiero ver mis órdenes de compra."),
+    PROV_COMPRADOR: Accion("proveedores", "Quiero hablar con mi comprador."),
+    PROV_CERRAR_SESION: Accion("proveedores", "Quiero cerrar mi sesión."),
 }
 
 
@@ -72,6 +92,7 @@ _OPCIONES_IDENTIFICADO = [
     OpcionLista(CONTRATOS, "📄 Mis contratos", "Contratos y avance de entregas"),
     OpcionLista(SALDO, "💰 Mi saldo", "Lo que debo y lo que está vencido"),
     OpcionLista(FACTURAS, "🧾 Mis facturas", "Folios, montos y estado de cobro"),
+    OpcionLista(COTIZACIONES, "🧮 Mis cotizaciones", "Precios y vigencia"),
     OpcionLista(ESTADO_CUENTA, "📄 Estado de cuenta", "Se lo mando en PDF"),
     OpcionLista(PRECIOS, "🌾 Precios del día", "Precios vigentes por tonelada"),
     OpcionLista(ASESOR, "👤 Hablar con asesor", "Le pasamos con una persona"),
@@ -81,6 +102,10 @@ _OPCIONES_IDENTIFICADO = [
 _OPCIONES_ANONIMO = [
     OpcionLista(IDENTIFICARME, "🔑 Identificarme", "Con su RFC y el nombre de su empresa"),
     OpcionLista(PRECIOS, "🌾 Precios del día", "Precios vigentes por tonelada"),
+    # Quien nos vende también escribe a este número. Sin esta puerta, un
+    # proveedor cae en el menú de clientes y se le pide identificarse contra un
+    # padrón donde no está.
+    OpcionLista(PROV_SOY_PROVEEDOR, "🚚 Soy proveedor", "Consultar mis pagos"),
     OpcionLista(ASESOR, "👤 Hablar con asesor", "Le pasamos con una persona"),
 ]
 
@@ -119,3 +144,35 @@ def texto_menu(identificado: bool, cliente: str = "") -> str:
         "Para consultar sus pedidos, contratos, facturas o saldo necesito "
         "identificarlo primero. ¿Qué desea hacer?"
     )
+
+
+# --- Menú del proveedor ------------------------------------------------------ #
+_OPCIONES_PROVEEDOR = [
+    OpcionLista(PROV_PAGOS, "💰 Mis pagos", "Lo que se me debe y lo vencido"),
+    OpcionLista(PROV_FACTURAS, "🧾 Mis facturas", "Folios, saldo y vencimiento"),
+    OpcionLista(PROV_ORDENES, "📦 Mis órdenes", "Órdenes de compra colocadas"),
+    OpcionLista(PROV_COMPRADOR, "👤 Mi comprador", "Le pasamos con una persona"),
+    OpcionLista(PROV_CERRAR_SESION, "🔒 Cerrar sesión", "Deja de mostrar mi información"),
+]
+
+_OPCIONES_PROVEEDOR_ANONIMO = [
+    OpcionLista(PROV_SOY_PROVEEDOR, "🔑 Identificarme", "Con el RFC de su empresa"),
+    OpcionLista(PROV_COMPRADOR, "👤 Mi comprador", "Le pasamos con una persona"),
+    OpcionLista(MENU, "↩️ Soy cliente", "Ir al menú de clientes"),
+]
+
+
+def menu_proveedor(identificado: bool) -> MenuLista:
+    """El menú del proveedor. Sin identificar no se ofrece ningún dato suyo."""
+    return MenuLista(
+        boton="Ver opciones",
+        seccion="Mi cuenta" if identificado else "Para empezar",
+        opciones=_OPCIONES_PROVEEDOR if identificado else _OPCIONES_PROVEEDOR_ANONIMO,
+    )
+
+
+# Pegados a cada respuesta ya dada. Máximo 3 (límite de Meta).
+BOTONES_PROVEEDOR = [
+    Boton(PROV_PAGOS, "💰 Mis pagos"),
+    Boton(PROV_COMPRADOR, "👤 Mi comprador"),
+]

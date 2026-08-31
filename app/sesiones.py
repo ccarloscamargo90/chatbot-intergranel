@@ -25,6 +25,13 @@ from .bus import EventBus, get_event_bus
 SESION_PREFIX = "bus:clientes:sesion:"
 INTENTOS_PREFIX = "bus:clientes:intentos:"
 
+# Las gemelas del proveedor. Prefijos distintos y no un campo `tipo` dentro del
+# valor: así un teléfono puede ser cliente Y proveedor a la vez —pasa, la
+# comercializadora le compra a quien también le vende— sin que una sesión pise
+# a la otra.
+SESION_PROVEEDOR_PREFIX = "bus:proveedores:sesion:"
+INTENTOS_PROVEEDOR_PREFIX = "bus:proveedores:intentos:"
+
 # Ventana del contador local de intentos fallidos.
 INTENTOS_TTL_SECONDS = 15 * 60
 # A partir de aquí el bot deja de intentar contra el ERP y pide esperar.
@@ -60,10 +67,23 @@ class SesionCliente:
 
 
 class SesionClienteStore:
-    """Guarda y recupera la sesión de autoservicio de cada teléfono."""
+    """Guarda y recupera la sesión de autoservicio de cada teléfono.
 
-    def __init__(self, bus: EventBus | None = None) -> None:
+    Los prefijos son parámetros para que la MISMA mecánica —caducidad, contador
+    de intentos, cierre— sirva al cliente y al proveedor. Copiada, la próxima
+    corrección se haría en una y se olvidaría en la otra.
+    """
+
+    def __init__(
+        self,
+        bus: EventBus | None = None,
+        *,
+        sesion_prefix: str = SESION_PREFIX,
+        intentos_prefix: str = INTENTOS_PREFIX,
+    ) -> None:
         self._bus = bus or get_event_bus()
+        self._sesion_prefix = sesion_prefix
+        self._intentos_prefix = intentos_prefix
 
     # --- Sesión ------------------------------------------------------------ #
     async def abrir(
@@ -78,7 +98,7 @@ class SesionClienteStore:
             abierta_en=ahora,
         )
         await self._bus.publish(
-            f"{SESION_PREFIX}{telefono}",
+            f"{self._sesion_prefix}{telefono}",
             {
                 "token": sesion.token,
                 "cliente": sesion.cliente,
@@ -93,7 +113,7 @@ class SesionClienteStore:
 
     async def leer(self, telefono: str) -> SesionCliente | None:
         """La sesión del teléfono, o None si no hay o ya caducó."""
-        datos = await self._bus.read(f"{SESION_PREFIX}{telefono}")
+        datos = await self._bus.read(f"{self._sesion_prefix}{telefono}")
         if not datos or not datos.get("token"):
             return None
         sesion = SesionCliente(
@@ -108,7 +128,7 @@ class SesionClienteStore:
     async def cerrar(self, telefono: str) -> None:
         """Borra la sesión local. Se llama también cuando el ERP dice que el
         token ya no sirve, para no seguir mandando uno muerto."""
-        await self._bus.publish(f"{SESION_PREFIX}{telefono}", {}, ttl=1)
+        await self._bus.publish(f"{self._sesion_prefix}{telefono}", {}, ttl=1)
 
     # --- Intentos fallidos ------------------------------------------------- #
     async def registrar_intento_fallido(self, telefono: str) -> int:
@@ -118,18 +138,33 @@ class SesionClienteStore:
         teléfono pueden contar como uno. Se acepta a propósito — el bloqueo que
         importa lo lleva el ERP, aquí solo se busca cortar el tecleo repetido.
         """
-        clave = f"{INTENTOS_PREFIX}{telefono}"
+        clave = f"{self._intentos_prefix}{telefono}"
         datos = await self._bus.read(clave) or {}
         total = int(datos.get("intentos", 0)) + 1
         await self._bus.publish(clave, {"intentos": total}, ttl=INTENTOS_TTL_SECONDS)
         return total
 
     async def intentos(self, telefono: str) -> int:
-        datos = await self._bus.read(f"{INTENTOS_PREFIX}{telefono}") or {}
+        datos = await self._bus.read(f"{self._intentos_prefix}{telefono}") or {}
         return int(datos.get("intentos", 0))
 
     async def limpiar_intentos(self, telefono: str) -> None:
-        await self._bus.publish(f"{INTENTOS_PREFIX}{telefono}", {"intentos": 0}, ttl=1)
+        await self._bus.publish(f"{self._intentos_prefix}{telefono}", {"intentos": 0}, ttl=1)
 
     async def bloqueado(self, telefono: str) -> bool:
         return await self.intentos(telefono) >= MAX_INTENTOS_LOCALES
+
+
+class SesionProveedorStore(SesionClienteStore):
+    """La misma sesión, pero del proveedor, en sus propias claves del bus.
+
+    `SesionCliente.cliente` guarda aquí la razón social del proveedor: el campo
+    se llama así porque la estructura es la misma, no porque sea un cliente.
+    """
+
+    def __init__(self, bus: EventBus | None = None) -> None:
+        super().__init__(
+            bus,
+            sesion_prefix=SESION_PROVEEDOR_PREFIX,
+            intentos_prefix=INTENTOS_PROVEEDOR_PREFIX,
+        )

@@ -35,6 +35,7 @@ app/
     compras.py          ← Funcional vía ERP, con lista blanca de teléfonos
     inventario.py       ← Funcional vía ERP, con alertas proactivas
     soporte.py          ← Atención al cliente + autoservicio (identificación por RFC)
+    proveedores.py      ← El otro lado del mostrador: "¿ya me pagaron?"
   assistant.py          ← Wrapper compat para tests legacy
   errores.py           ← El motivo REAL de un fallo HTTP (Meta o ERP), no el status
   fletes.py            ← Cotización de fletes: salida al transportista e
@@ -45,7 +46,7 @@ tests/
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
-  test_chatwoot.py, test_documentos.py, test_fletes.py
+  test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -135,7 +136,7 @@ listo. `test_botones.py` falla si un id del menú se queda sin acción.
 ## Documentos al cliente (tool `enviar_mi_documento`)
 
 El cliente identificado puede pedir su factura (PDF **y** XML), su contrato
-firmado o su estado de cuenta, y le llegan por WhatsApp.
+firmado, su **cotización** o su estado de cuenta, y le llegan por WhatsApp.
 
 Los bytes van del ERP al bot y del bot a la Media API de Meta
 (`WhatsAppClient.upload_media` → `send_document` por `media_id`). **Nunca se
@@ -154,6 +155,28 @@ Tres cosas que conviene no romper:
 
 Los tipos válidos viven en tres lados que tienen que coincidir —`TIPOS_DOCUMENTO`,
 el `enum` de la tool y el ERP—; `test_documentos.py` falla si se separan.
+
+### Cotizaciones: el borrador NO sale, y el precio vencido se anuncia
+
+Hay **dos** cosas que se llaman cotización y no son la misma: `Cotizacion` en el
+ERP es el documento formal pre-contrato (cliente, vendedor, grano, toneladas,
+precio, vigencia, y `convertirAContrato` cuando se acepta); `BotCotizacion` es
+la consulta de precio suelta que el agente de Ventas guarda por teléfono. La que
+se manda por WhatsApp es la **formal**.
+
+Dos reglas que conviene no romper:
+
+- **Las BORRADOR no se listan ni se mandan.** Un borrador es el precio con el
+  que el vendedor todavía está trabajando —lo sube, lo baja, revisa margen— y
+  que el cliente no ha recibido. Entregárselo le pone en la mano una oferta que
+  la empresa no ha hecho. Un borrador cae en el mismo "no aparece en su cuenta"
+  que un folio ajeno: decir "sí es suya pero está en borrador" delataría que le
+  están preparando algo.
+- **`vencida` viene calculada del ERP**, no se deduce de la fecha. Si el modelo
+  tuviera que comparar `vigencia_hasta` contra hoy para saber si un precio sigue
+  vivo, tarde o temprano ofrecería uno caducado. El PDF también lo marca, en
+  rojo. El grano se mueve de precio y el cliente hace cuentas con lo que se le
+  diga.
 
 ### El MIME que Meta acepta no es el MIME del archivo
 
@@ -188,6 +211,43 @@ para contestar: si el motivo va mudo, el modelo rellena el hueco.
 De ahí también que `errores.py` (`detalle_http` / `detalle_respuesta`) sea
 compartido: `str(HTTPStatusError)` dice el status y tira el mensaje del ERP o de
 Meta, que es el único que explica algo. Estaba resuelto solo para los avisos.
+
+## Proveedores: el otro lado del mostrador (app/agents/proveedores.py)
+
+Quien nos VENDE también escribe a este número, y su pregunta es siempre la
+misma: **"¿ya me pagaron?"** — y su gemela, "¿cuándo?". Se identifica con la
+razón social de su empresa y su RFC, igual que el cliente, y consulta cuánto se
+le debe, qué ya venció, sus facturas y sus órdenes de compra.
+
+**Es un agente aparte, no una rama de Soporte.** Son dos audiencias con datos
+que no se pueden mezclar: sesiones en tablas distintas del ERP
+(`X-Bot-Sesion-Proveedor`) y en claves distintas del bus
+(`bus:proveedores:sesion:`). Un mismo teléfono puede ser cliente Y proveedor
+—se le compra a quien también se le vende— y cada identificación abre lo suyo
+sin pisar la otra.
+
+**No es una categoría del clasificador**, a propósito. Un modelo no puede saber
+por el texto si quien pregunta "¿cuándo me pagan?" es un proveedor o un cliente
+esperando su nota de crédito, y equivocarse manda a alguien a identificarse
+contra el padrón que no es. Se entra por el botón **🚚 Soy proveedor** del menú
+anónimo o por `/proveedor`: intenciones exactas. El prompt de Soporte —que es el
+fallback— sabe ofrecer esa puerta cuando huele a proveedor.
+
+Cuatro cosas que el código cuida:
+
+- **Sin RFC no hay autoservicio.** Un proveedor extranjero no tiene RFC
+  mexicano y el RFC ES el segundo factor; identificarlo por "nombre + país"
+  sería adivinable. El prompt tiene prohibido prometerle otra vía: se le dice
+  que su comprador lo sigue atendiendo por correo.
+- **Nunca se promete una fecha de pago.** Se puede decir qué está vencido y qué
+  no; cuándo se paga lo decide una persona. Prometerlo por chat crea una deuda
+  de palabra que nadie autorizó.
+- **`vencida` viene calculada del ERP.** Restar fechas es como el modelo acaba
+  diciéndole a alguien que su pago está al corriente cuando lleva un mes.
+- **Nada menciona una marca propia.** Un proveedor no debe saber bajo qué marca
+  se revende lo que nos vende (regla de oro de GRANCORE, del lado del ERP).
+  `test_proveedores.py` lo verifica sobre las respuestas de las tools **y**
+  sobre el prompt.
 
 ## Handoff a un asesor humano (app/chatwoot.py, app/handoff.py)
 
@@ -350,6 +410,7 @@ Endpoints que el ERP expone (ya implementados en `ERP-INTERGRANEL`):
 - `GET /api/v1/bot/clientes/contratos` → `Order[]`
 - `GET /api/v1/bot/clientes/pedidos` → `CustomerOrder[]`
 - `GET /api/v1/bot/clientes/facturas` → `CustomerInvoice[]`
+- `GET /api/v1/bot/clientes/cotizaciones` → `CustomerQuote[]` (sin BORRADOR)
 - `GET /api/v1/bot/clientes/documentos/:tipo?folio=` → los bytes del archivo
 - `POST /api/v1/bot/clientes/cerrar-sesion`
 
@@ -434,7 +495,8 @@ Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,4
 | listar_mis_pedidos | — | ✔ | Pedidos con estado y fecha de entrega |
 | listar_mis_facturas | — | ✔ | Facturas con monto, saldo y estado |
 | consultar_orden | order_id | ✔ | Un contrato **de los suyos**, por folio |
-| enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato o su estado de cuenta |
+| listar_mis_cotizaciones | — | ✔ | Cotizaciones con precio, vigencia y si ya venció |
+| enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato, su cotización o su estado de cuenta |
 | cerrar_sesion | — | ✔ | Deja de mostrar su información |
 | escalar_a_humano | motivo | — | Abre la conversación en Chatwoot y pasa el teléfono a handoff |
 
@@ -445,6 +507,26 @@ audita lo lleva el ERP.
 
 Cliente del mock (`MockERPClient`): Molinos del Bajío S.A. de C.V., RFC
 `MBA950101AB1` — saldo $204,500.00 con $112,500.00 vencidos.
+
+### Proveedores (agents/proveedores.py) — Autoservicio del proveedor
+
+| Tool | Params requeridos | Sesión | Qué hace |
+|---|---|---|---|
+| identificar_proveedor | nombre, rfc | — | Valida el par contra el ERP y abre sesión |
+| resumen_de_mi_cuenta_proveedor | — | ✔ | Por pagar, vencido, facturas y OC abiertas |
+| listar_mis_facturas_proveedor | — | ✔ | Sus facturas con saldo, moneda y si venció |
+| listar_mis_ordenes_proveedor | — | ✔ | Órdenes de compra colocadas |
+| cerrar_sesion_proveedor | — | ✔ | Deja de mostrar su información |
+
+Proveedor del mock (`MockERPClient`): Granos del Norte S.A. de C.V., RFC
+`GNO900215QT4` — $231,000.00 por pagar, de los cuales $185,000.00 vencidos.
+
+Endpoints que el ERP expone:
+- `POST /api/v1/bot/proveedores/identificar` → `Identificacion`
+- `GET /api/v1/bot/proveedores/resumen` → `SupplierSummary`
+- `GET /api/v1/bot/proveedores/facturas` → `SupplierInvoice[]`
+- `GET /api/v1/bot/proveedores/ordenes` → `SupplierPurchaseOrder[]`
+- `POST /api/v1/bot/proveedores/cerrar-sesion`
 
 ### Compras (agents/compras.py) — Funcional vía ERP (mock o HTTP)
 

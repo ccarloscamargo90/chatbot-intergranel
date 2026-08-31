@@ -134,12 +134,14 @@ decir "hay varios" ya sería confirmar que el RFC existe.
 | `GET /api/v1/bot/clientes/contratos` | `Order[]` (el mismo DTO de `/bot/ordenes`) |
 | `GET /api/v1/bot/clientes/pedidos` | `CustomerOrder[]` |
 | `GET /api/v1/bot/clientes/facturas` | `CustomerInvoice[]` |
+| `GET /api/v1/bot/clientes/cotizaciones` | `CustomerQuote[]` (nunca BORRADOR) |
 | `GET /api/v1/bot/clientes/documentos/{tipo}?folio=` | El archivo crudo (bytes) |
 | `POST /api/v1/bot/clientes/cerrar-sesion` | `{ "cerrada": true }` |
 
 ### Documentos
 
-`tipo` es uno de `factura` · `factura_xml` · `contrato` · `estado_de_cuenta`.
+`tipo` es uno de `factura` · `factura_xml` · `contrato` · `cotizacion` ·
+`estado_de_cuenta`.
 Los tres primeros exigen `?folio=` y **se buscan entre los del cliente de la
 sesión**, nunca contra el catálogo global: los folios son consecutivos, así que
 acertar uno ajeno sería contar, no adivinar. Un folio que no es suyo devuelve
@@ -148,6 +150,23 @@ acertar uno ajeno sería contar, no adivinar. Un folio que no es suyo devuelve
 El `estado_de_cuenta` no lleva folio: se genera al vuelo con los mismos números
 de `CarteraLecturaService`, para que el PDF y lo que dijo el bot por chat cuadren
 renglón por renglón.
+
+La `cotizacion` también se genera al vuelo (`CotizacionPdfService`), con dos
+reglas propias:
+
+- **Las BORRADOR no existen para el cliente.** Ni en
+  `GET /bot/clientes/cotizaciones` ni como documento. Un borrador es el precio
+  con el que el vendedor todavía está trabajando y que el cliente no ha
+  recibido; entregárselo sería darle una oferta que la empresa no ha hecho.
+  Cae en el mismo 404 opaco que un folio ajeno, a propósito: decir "sí es suya
+  pero está en borrador" delataría que le están preparando algo.
+- **Los números no se recalculan.** Se imprime el `montoTotal` guardado, que es
+  el mismo que hereda el contrato al convertirse. Un PDF que hiciera
+  `toneladas × precio` podría redondear distinto y anunciarle al cliente un
+  importe que después no se le va a facturar.
+- El IVA se desglosa con **tasa 0%** (Art. 2-A LIVA, producto destinado a la
+  alimentación). Se imprime aunque sea cero: un total sin renglón de impuesto
+  deja al lector adivinando si ya lo trae dentro.
 
 **Se devuelven los BYTES, no una URL.** El bot los sube a la Media API de Meta y
 manda el documento por `media_id`, así que en ningún momento existe un enlace

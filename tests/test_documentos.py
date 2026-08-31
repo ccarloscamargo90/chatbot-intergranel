@@ -306,3 +306,48 @@ def test_el_origen_del_fallo_no_se_etiqueta_a_ciegas():
 
     # Sin respuesta (timeout, DNS) no hay host que reportar, pero sí un tipo.
     assert detalle_http(httpx.ConnectTimeout("agotado"), AUTO) == "ConnectTimeout: agotado"
+
+
+# ------------------------------ Cotizaciones ------------------------------- #
+def test_manda_la_cotizacion_en_pdf(agente):
+    _identificar(agente)
+    data = _run(agente, "enviar_mi_documento", {"tipo": "cotizacion", "folio": "COT-2026-0007"})
+
+    assert data["enviado"] is True
+    upload, _send = agente.enviados
+    assert upload["nombre"] == "COT-2026-0007.pdf"
+    assert upload["mime"] == "application/pdf"
+
+
+def test_una_cotizacion_ajena_no_se_manda(agente):
+    _identificar(agente)
+    data = _run(agente, "enviar_mi_documento", {"tipo": "cotizacion", "folio": "COT-2026-9999"})
+    assert data["enviado"] is False
+    assert data["motivo"] == "no_esta_en_su_cuenta"
+    assert agente.enviados == []
+
+
+def test_la_cotizacion_exige_folio(agente):
+    _identificar(agente)
+    data = _run(agente, "enviar_mi_documento", {"tipo": "cotizacion"})
+    assert data["motivo"] == "falta_folio"
+
+
+def test_listar_cotizaciones_marca_las_vencidas(agente):
+    """`vencida` viaja masticado: deducirlo de una fecha es cómo el modelo
+    termina ofreciendo un precio que ya caducó."""
+    _identificar(agente)
+    data = _run(agente, "listar_mis_cotizaciones")
+
+    assert data["identificado"] is True
+    por_folio = {c["id"]: c for c in data["cotizaciones"]}
+    assert por_folio["COT-2026-0007"]["vencida"] is False
+    assert por_folio["COT-2026-0003"]["vencida"] is True
+    # La aceptada trae el contrato que salió de ella.
+    assert por_folio["COT-2026-0003"]["contrato"] == "CONT-2026-0002"
+
+
+def test_las_cotizaciones_exigen_sesion(agente):
+    data = _run(agente, "listar_mis_cotizaciones")
+    assert data["identificado"] is False
+    assert "listar_mis_cotizaciones" in TOOLS_CON_SESION
