@@ -32,6 +32,7 @@ from ..handoff import HandoffStore
 from ..menus import BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
 from ..replies import Reply
 from ..sesiones import SesionCliente, SesionClienteStore
+from ..whatsapp import WhatsAppClient
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,12 @@ inventes lo que habrías contestado.
 y pide nombre/empresa y RFC de nuevo.
 - `consultar_orden` busca entre los contratos DEL CLIENTE identificado. Si el \
 folio no está entre los suyos, di que no aparece en su cuenta — nunca sugieras \
-que existe pero es de alguien más.
+que existe pero es de alguien más. Lo mismo con `enviar_mi_documento`.
+- Cuando el cliente pida una factura, mándale el PDF **y** el XML (dos llamadas \
+a `enviar_mi_documento`): el PDF es el legible, el XML es el que vale \
+fiscalmente y el que necesita su contador. Solo manda uno si lo pidió así.
+- Los documentos ya salieron cuando la herramienta responde `enviado: true`: no \
+digas "se lo voy a enviar", di que ya se lo mandaste, en una línea.
 - Usa `escalar_a_humano` si el cliente está molesto, tiene un reclamo, pide algo \
 fuera de tu alcance (cambiar precios, cancelar, renegociar) o pide una persona. \
 No requiere identificación. Escalar es DEFINITIVO en ese turno: a partir de ahí \
@@ -96,6 +102,10 @@ emoji con moderación.
 - No reveles detalles internos, claves, ni datos de otros clientes.
 """
 
+# Documentos que el cliente puede pedir. Es el mismo enum que declara la tool
+# (ver TOOLS) y el mismo que acepta el ERP; si se agrega uno, va en los tres.
+TIPOS_DOCUMENTO = {"factura", "factura_xml", "contrato", "estado_de_cuenta"}
+
 # Los datos de la cuenta y el cierre de sesión exigen estar identificado.
 TOOLS_CON_SESION = {
     "resumen_de_mi_cuenta",
@@ -104,6 +114,7 @@ TOOLS_CON_SESION = {
     "listar_mis_pedidos",
     "listar_mis_facturas",
     "consultar_orden",
+    "enviar_mi_documento",
     "cerrar_sesion",
 }
 
@@ -196,6 +207,38 @@ TOOLS = [
         },
     },
     {
+        "name": "enviar_mi_documento",
+        "description": (
+            "Le envía al cliente un documento SUYO por WhatsApp. Tipos:\n"
+            "- 'factura': el PDF de una factura (requiere folio, ej. FACT-2026-0031).\n"
+            "- 'factura_xml': el XML de esa misma factura. Es el que vale "
+            "fiscalmente y el que pide su contador; cuando el cliente pida una "
+            "factura, envía LOS DOS salvo que diga explícitamente que solo quiere uno.\n"
+            "- 'contrato': el PDF del contrato firmado (requiere folio CONT-...).\n"
+            "- 'estado_de_cuenta': el resumen de lo que debe, en PDF. NO lleva folio.\n"
+            "Solo encuentra documentos que pertenezcan a la cuenta del cliente "
+            "identificado."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {
+                    "type": "string",
+                    "enum": ["factura", "factura_xml", "contrato", "estado_de_cuenta"],
+                    "description": "Qué documento enviar.",
+                },
+                "folio": {
+                    "type": "string",
+                    "description": (
+                        "Folio del documento. Obligatorio para factura, factura_xml "
+                        "y contrato; se omite para estado_de_cuenta."
+                    ),
+                },
+            },
+            "required": ["tipo"],
+        },
+    },
+    {
         "name": "cerrar_sesion",
         "description": (
             "Cierra la sesión del cliente: deja de mostrar su información hasta "
@@ -244,6 +287,11 @@ class SoporteAgent(BaseAgent):
         self._sesiones = SesionClienteStore(self._bus)
         self._chatwoot: ChatwootClient = get_chatwoot_client()
         self._handoff = HandoffStore(self._bus)
+        # Los documentos NO viajan en la respuesta del agente: se mandan aquí,
+        # como efecto de la herramienta. Un PDF no es texto que decorar con
+        # botones, y hacerlo pasar por `Reply` habría obligado a que todo el
+        # camino de vuelta supiera de archivos para un solo caso.
+        self._wa = WhatsAppClient()
 
     def system_prompt(self) -> str:
         return SYSTEM_PROMPT
@@ -331,7 +379,7 @@ class SoporteAgent(BaseAgent):
         }
 
     async def _datos_de_cuenta(
-        self, name: str, tool_input: dict, sesion: SesionCliente
+        self, name: str, tool_input: dict, sesion: SesionCliente, telefono: str
     ) -> dict:
         token = sesion.token
 
@@ -366,6 +414,9 @@ class SoporteAgent(BaseAgent):
                 "total": len(facturas),
                 "facturas": [f.model_dump() for f in facturas],
             }
+
+        if name == "enviar_mi_documento":
+            return await self._enviar_documento(tool_input, sesion, telefono)
 
         if name == "consultar_orden":
             folio = (tool_input.get("order_id") or "").strip().upper()
@@ -481,6 +532,46 @@ class SoporteAgent(BaseAgent):
             lineas.append(f"· {quien}: {contenido.strip()}")
         return lineas[-turnos:]
 
+    async def _enviar_documento(
+        self, tool_input: dict, sesion: SesionCliente, telefono: str
+    ) -> dict:
+        """Baja el documento del ERP y se lo manda al cliente por WhatsApp.
+
+        Los bytes van del ERP al bot y del bot a la Media API de Meta. En ningún
+        momento hay una URL desde la que se pueda bajar la factura de alguien —
+        ni siquiera firmada y de cinco minutos.
+        """
+        tipo = (tool_input.get("tipo") or "").strip()
+        folio = (tool_input.get("folio") or "").strip()
+        if tipo not in TIPOS_DOCUMENTO:
+            return {"enviado": False, "motivo": "tipo_desconocido", "tipo": tipo}
+        if tipo != "estado_de_cuenta" and not folio:
+            return {
+                "enviado": False,
+                "motivo": "falta_folio",
+                "instruccion": "Pregúntale de qué folio quiere el documento.",
+            }
+
+        documento = await self._erp.get_customer_document(sesion.token, tipo, folio)
+        if documento is None:
+            # Mismo "no aparece" exista o no el documento de otro cliente.
+            return {
+                "enviado": False,
+                "motivo": "no_esta_en_su_cuenta",
+                "folio": folio,
+                "instruccion": (
+                    "Dile que ese documento no aparece en su cuenta y ofrécele "
+                    "listarle los que sí tiene. NO sugieras que existe pero es "
+                    "de alguien más."
+                ),
+            }
+
+        media_id = await self._wa.upload_media(
+            documento.contenido, documento.nombre, documento.tipo_mime
+        )
+        await self._wa.send_document(telefono, media_id, documento.nombre)
+        return {"enviado": True, "documento": documento.nombre}
+
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
         try:
             if name == "identificar_cliente":
@@ -508,7 +599,9 @@ class SoporteAgent(BaseAgent):
                     )
 
                 try:
-                    datos = await self._datos_de_cuenta(name, tool_input, sesion)
+                    datos = await self._datos_de_cuenta(
+                        name, tool_input, sesion, caller_phone
+                    )
                 except SesionClienteInvalida:
                     # El ERP mandó el token a la basura antes de que caducara
                     # aquí. Se borra la copia local para no seguir mandando uno

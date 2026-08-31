@@ -134,7 +134,30 @@ decir "hay varios" ya sería confirmar que el RFC existe.
 | `GET /api/v1/bot/clientes/contratos` | `Order[]` (el mismo DTO de `/bot/ordenes`) |
 | `GET /api/v1/bot/clientes/pedidos` | `CustomerOrder[]` |
 | `GET /api/v1/bot/clientes/facturas` | `CustomerInvoice[]` |
+| `GET /api/v1/bot/clientes/documentos/{tipo}?folio=` | El archivo crudo (bytes) |
 | `POST /api/v1/bot/clientes/cerrar-sesion` | `{ "cerrada": true }` |
+
+### Documentos
+
+`tipo` es uno de `factura` · `factura_xml` · `contrato` · `estado_de_cuenta`.
+Los tres primeros exigen `?folio=` y **se buscan entre los del cliente de la
+sesión**, nunca contra el catálogo global: los folios son consecutivos, así que
+acertar uno ajeno sería contar, no adivinar. Un folio que no es suyo devuelve
+404 con el mismo mensaje que uno inexistente.
+
+El `estado_de_cuenta` no lleva folio: se genera al vuelo con los mismos números
+de `CarteraLecturaService`, para que el PDF y lo que dijo el bot por chat cuadren
+renglón por renglón.
+
+**Se devuelven los BYTES, no una URL.** El bot los sube a la Media API de Meta y
+manda el documento por `media_id`, así que en ningún momento existe un enlace
+—ni firmado, ni de cinco minutos— desde el que se pueda bajar el CFDI de un
+cliente. Es también la razón de que el endpoint no reutilice
+`StorageService.getSignedUrl`, que sí se usa para los correos.
+
+Un archivo cuya URL guardada no apunte al bucket del ERP no se sirve
+(`keyFromUrl` devuelve null): si no, el endpoint sería un proxy de salida hacia
+donde alguien haya escrito esa columna.
 
 **401** significa una sola cosa: la sesión expiró o se cerró. El bot lo traduce
 a "su sesión caducó por seguridad, identifíquese de nuevo" y borra su copia

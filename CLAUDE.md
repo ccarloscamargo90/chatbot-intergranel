@@ -129,6 +129,29 @@ agente nunca se entera de que hubo un botón.
 Al agregar una opción al menú: id nuevo en `menus.py`, entrada en `ACCIONES`, y
 listo. `test_botones.py` falla si un id del menú se queda sin acción.
 
+## Documentos al cliente (tool `enviar_mi_documento`)
+
+El cliente identificado puede pedir su factura (PDF **y** XML), su contrato
+firmado o su estado de cuenta, y le llegan por WhatsApp.
+
+Los bytes van del ERP al bot y del bot a la Media API de Meta
+(`WhatsAppClient.upload_media` → `send_document` por `media_id`). **Nunca se
+publica una URL** desde la que se pueda bajar el documento de un cliente, ni
+siquiera firmada y de cinco minutos: un CFDI no es un archivo cualquiera.
+
+Tres cosas que conviene no romper:
+
+- La tool está en `TOOLS_CON_SESION`, y el ERP resuelve el folio **entre los del
+  cliente**. Sin las dos, adivinar un consecutivo entregaría la factura de otro.
+- Al pedir una factura se mandan **PDF y XML**. El XML es el que vale
+  fiscalmente y el que pide el contador; mandar solo el PDF deja el trabajo a
+  medias.
+- El `filename` es lo que le queda guardado al cliente en el teléfono:
+  `FACT-2026-0031.pdf`, no `documento.pdf`.
+
+Los tipos válidos viven en tres lados que tienen que coincidir —`TIPOS_DOCUMENTO`,
+el `enum` de la tool y el ERP—; `test_documentos.py` falla si se separan.
+
 ## Handoff a un asesor humano (app/chatwoot.py, app/handoff.py)
 
 Cuando el cliente pide una persona, `escalar_a_humano` abre una conversación en
@@ -182,7 +205,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 207 tests pasando
+pytest -q                  # 221 tests pasando
 ```
 
 ## Estado actual y fases
@@ -290,6 +313,7 @@ Endpoints que el ERP expone (ya implementados en `ERP-INTERGRANEL`):
 - `GET /api/v1/bot/clientes/contratos` → `Order[]`
 - `GET /api/v1/bot/clientes/pedidos` → `CustomerOrder[]`
 - `GET /api/v1/bot/clientes/facturas` → `CustomerInvoice[]`
+- `GET /api/v1/bot/clientes/documentos/:tipo?folio=` → los bytes del archivo
 - `POST /api/v1/bot/clientes/cerrar-sesion`
 
 Contrato completo (incluida la nota honesta sobre la fuerza de la
@@ -321,6 +345,7 @@ Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,4
 | listar_mis_pedidos | — | ✔ | Pedidos con estado y fecha de entrega |
 | listar_mis_facturas | — | ✔ | Facturas con monto, saldo y estado |
 | consultar_orden | order_id | ✔ | Un contrato **de los suyos**, por folio |
+| enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato o su estado de cuenta |
 | cerrar_sesion | — | ✔ | Deja de mostrar su información |
 | escalar_a_humano | motivo | — | Abre la conversación en Chatwoot y pasa el teléfono a handoff |
 
