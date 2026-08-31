@@ -29,6 +29,7 @@ import unicodedata
 import httpx
 
 from .config import get_settings
+from .errores import codigo_erp, detalle_respuesta
 from .models import (
     CustomerDebt,
     CustomerDebtLine,
@@ -60,6 +61,26 @@ class SesionClienteInvalida(Exception):
     pide al cliente identificarse otra vez. Se distingue de un fallo del ERP
     justo para no contestarle "hubo un problema técnico" a alguien cuya sesión
     simplemente caducó.
+    """
+
+
+class DocumentoSinArchivo(Exception):
+    """El documento SÍ es del cliente, pero el ERP no tiene archivo cargado.
+
+    Una factura capturada a mano o importada de CONTPAQi sin adjuntar el CFDI,
+    un contrato que todavía no se firma. Va aparte del "no está en su cuenta"
+    (que es `None`) porque son cosas distintas y contestarlas igual fue el bug:
+    el bot le listó a un cliente sus facturas y enseguida le dijo que no
+    aparecían en su cuenta.
+    """
+
+
+class DocumentoNoRecuperable(Exception):
+    """El archivo debería estar y el ERP no lo pudo entregar.
+
+    Storage sin configurar, objeto borrado del bucket, URL fuera de él. Es un
+    problema nuestro y no se arregla reintentando, así que el agente lo dice
+    como lo que es en vez de sugerirle al cliente que insista.
     """
 
 
@@ -160,9 +181,16 @@ class ERPClient(abc.ABC):
         """Un documento del cliente de la sesión, con sus bytes.
 
         `tipo`: factura | factura_xml | contrato | estado_de_cuenta. Los tres
-        primeros exigen folio y se buscan ENTRE LOS DEL CLIENTE. Devuelve None
-        si no existe en su cuenta — que es también la respuesta cuando el folio
-        es de otro, para no confirmar folios ajenos."""
+        primeros exigen folio y se buscan ENTRE LOS DEL CLIENTE.
+
+        Tres salidas distintas, y la diferencia importa:
+
+        - `None` — no está entre los suyos. Es también la respuesta cuando el
+          folio es de otro: distinguirlos confirmaría folios ajenos.
+        - `DocumentoSinArchivo` — es suyo, pero no tiene archivo cargado.
+        - `DocumentoNoRecuperable` — es suyo y debería tener archivo, pero no
+          se pudo bajar.
+        """
 
     @abc.abstractmethod
     async def close_customer_session(self, token: str) -> None:
@@ -375,6 +403,14 @@ class HTTPERPClient(ERPClient):
             )
             if resp.status_code == 404:
                 return None
+            # Se decide por el código del cuerpo, no por el status: un 503 es
+            # tanto "no bajé el archivo" como "la base no responde", y el
+            # agente tiene que contestar distinto en cada caso.
+            codigo = codigo_erp(resp)
+            if codigo == "DocumentoSinArchivo":
+                raise DocumentoSinArchivo(detalle_respuesta(resp, "ERP"))
+            if codigo == "ArchivoNoRecuperable":
+                raise DocumentoNoRecuperable(detalle_respuesta(resp, "ERP"))
             self._exigir_sesion(resp)
             return CustomerDocument(
                 nombre=self._nombre_adjunto(resp, tipo, folio),
@@ -519,6 +555,9 @@ _MOCK_FACTURAS = [
         contrato="CONT-2026-0002",
     ),
 ]
+
+# FACT-2026-0044 existe en la cuenta del cliente pero no tiene archivo cargado.
+_MOCK_FACTURAS_SIN_ARCHIVO = {"FACT-2026-0044"}
 
 # Cuánto dura una sesión de autoservicio simulada (el ERP real manda la suya).
 _MOCK_SESION_TTL = 30 * 60
@@ -815,6 +854,15 @@ class MockERPClient(ERPClient):
         if tipo in ("factura", "factura_xml"):
             if not any(f.id == buscado for f in _MOCK_FACTURAS):
                 return None
+            # Una factura registrada SIN archivo es lo normal en producción:
+            # las que se capturan a mano o llegan de CONTPAQi no traen el CFDI
+            # adjunto. El mock trae una así a propósito — que el caso feliz sea
+            # el único simulado es lo que dejó pasar el bug.
+            if buscado in _MOCK_FACTURAS_SIN_ARCHIVO:
+                raise DocumentoSinArchivo(
+                    f"ERP 409: La factura {buscado} está registrada en su cuenta, "
+                    "pero todavía no tiene el archivo cargado en el sistema"
+                )
             extension = "xml" if tipo == "factura_xml" else "pdf"
             return CustomerDocument(
                 nombre=f"{buscado}.{extension}",
