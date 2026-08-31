@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import logging
 
+from ..chatwoot import ChatwootClient, ChatwootNoDisponible, get_chatwoot_client
 from ..erp import SesionClienteInvalida
+from ..handoff import HandoffStore
 from ..menus import BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
 from ..replies import Reply
 from ..sesiones import SesionCliente, SesionClienteStore
@@ -73,7 +75,12 @@ folio no está entre los suyos, di que no aparece en su cuenta — nunca sugiera
 que existe pero es de alguien más.
 - Usa `escalar_a_humano` si el cliente está molesto, tiene un reclamo, pide algo \
 fuera de tu alcance (cambiar precios, cancelar, renegociar) o pide una persona. \
-Esa herramienta no requiere identificación.
+No requiere identificación. Escalar es DEFINITIVO en ese turno: a partir de ahí \
+le contesta una persona, no tú, así que despídete en un mensaje corto en vez de \
+seguir ofreciendo opciones.
+- Si `escalar_a_humano` responde `escalado: false`, NO le prometas que alguien \
+lo contactará: nadie se enteró. Dile con honestidad que no se pudo y sigue la \
+instrucción que venga en la respuesta.
 - El cliente puede mandarte imágenes (una remisión, un comprobante) o PDFs. \
 Léelos y úsalos; si traen un folio, úsalo para consultar.
 
@@ -200,9 +207,11 @@ TOOLS = [
     {
         "name": "escalar_a_humano",
         "description": (
-            "Escala la conversación a un asesor humano cuando el cliente lo pide, "
+            "Pasa la conversación a un asesor humano cuando el cliente lo pide, "
             "tiene un reclamo, o la solicitud está fuera del alcance del agente. "
-            "No requiere identificación."
+            "Abre la conversación en la bandeja del equipo con el contexto de lo "
+            "que se habló. A partir de ese momento le responde una persona y tú "
+            "dejas de atender ese teléfono. No requiere identificación."
         ),
         "input_schema": {
             "type": "object",
@@ -233,6 +242,8 @@ class SoporteAgent(BaseAgent):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._sesiones = SesionClienteStore(self._bus)
+        self._chatwoot: ChatwootClient = get_chatwoot_client()
+        self._handoff = HandoffStore(self._bus)
 
     def system_prompt(self) -> str:
         return SYSTEM_PROMPT
@@ -248,6 +259,12 @@ class SoporteAgent(BaseAgent):
         cliente descubre qué puede pedir. El resto del tiempo bastan dos
         botones — el menú y el asesor — para no tapar la respuesta.
         """
+        # Si acaba de entrar un asesor, la despedida va sin botones: tocarlos
+        # ya no llevaría a ningún lado del bot, solo reenviaría el toque a la
+        # bandeja. Ofrecer un menú que ya no manda es peor que no ofrecerlo.
+        if await self._handoff.por_telefono(phone) is not None:
+            return Reply(texto=texto)
+
         sesion = await self._sesiones.leer(phone)
         if sesion is not None and sesion.recien_abierta():
             return Reply(
@@ -366,6 +383,104 @@ class SoporteAgent(BaseAgent):
 
         raise KeyError(name)
 
+    async def _escalar(self, telefono: str, motivo: str) -> dict:
+        """Pasa la conversación a un asesor de carne y hueso, en Chatwoot.
+
+        El escalamiento de antes solo escribía en el log y le prometía al
+        cliente que "un asesor continuará en breve" — sin que nadie se enterara.
+        Ahora abre la conversación de verdad, y si no puede, lo dice.
+        """
+        if not self._chatwoot.habilitado:
+            logger.warning(
+                "Escalamiento sin Chatwoot configurado (%s): %s", telefono, motivo
+            )
+            return {
+                "escalado": False,
+                "motivo": "canal_no_configurado",
+                "instruccion": (
+                    "Dile que en este momento no puedes pasarlo con un asesor y "
+                    "ofrécele el teléfono de oficina o que escriba más tarde. NO "
+                    "le prometas que alguien lo contactará."
+                ),
+            }
+
+        sesion = await self._sesiones.leer(telefono)
+        try:
+            conversacion = await self._chatwoot.abrir_conversacion(
+                telefono,
+                nombre=sesion.cliente if sesion else "",
+                atributos={"rfc": sesion.rfc} if sesion else None,
+            )
+            await self._chatwoot.nota_privada(
+                conversacion.id, await self._contexto(telefono, motivo, sesion)
+            )
+            await self._handoff.abrir(telefono, conversacion.id)
+        except ChatwootNoDisponible as exc:
+            # Que el cliente sepa la verdad. Un escalamiento que se pierde en
+            # silencio es alguien esperando una respuesta que no va a llegar.
+            logger.error("No se pudo escalar %s a Chatwoot: %s", telefono, exc)
+            return {
+                "escalado": False,
+                "motivo": "chatwoot_no_disponible",
+                "instruccion": (
+                    "Dile con honestidad que no lograste pasarlo con un asesor "
+                    "en este momento y pídele que lo intente en unos minutos. NO "
+                    "le prometas que alguien lo contactará."
+                ),
+            }
+
+        logger.info(
+            "Escalado %s a la conversación %s de Chatwoot", telefono, conversacion.id
+        )
+        return {
+            "escalado": True,
+            "instruccion": (
+                "Confírmale que ya lo estás pasando con un asesor y que a partir "
+                "de ahora le responderá una persona. Despídete en UN mensaje "
+                "corto: lo que escriba después ya lo lee el asesor, no tú."
+            ),
+        }
+
+    async def _contexto(
+        self, telefono: str, motivo: str, sesion: SesionCliente | None
+    ) -> str:
+        """Nota privada para el asesor: quién es y qué venía pidiendo.
+
+        Es la diferencia entre que el cliente repita todo desde cero y que el
+        asesor entre ya sabiendo. Va como nota PRIVADA: el cliente no la ve.
+        """
+        lineas = [f"🤖 Escalado por el bot · motivo: {motivo}", f"Teléfono: {telefono}"]
+        if sesion is not None:
+            lineas.append(f"Cliente identificado: {sesion.cliente} · RFC {sesion.rfc}")
+        else:
+            lineas.append("Cliente NO identificado (no dio nombre + RFC).")
+
+        historial = await self._historial_reciente(telefono)
+        if historial:
+            lineas.append("")
+            lineas.append("Últimos mensajes:")
+            lineas.extend(historial)
+        return "\n".join(lineas)
+
+    async def _historial_reciente(self, telefono: str, turnos: int = 6) -> list[str]:
+        """Los últimos turnos en texto plano, para la nota del asesor."""
+        try:
+            historial = await self._history_store.load(self._history_key(telefono))
+        except Exception:  # noqa: BLE001 - sin historial se escala igual
+            logger.exception("No se pudo leer el historial de %s para la nota", telefono)
+            return []
+
+        lineas = []
+        for turno in historial:
+            contenido = turno.get("content")
+            # Solo el texto: los bloques de tool_use/tool_result son ruido para
+            # una persona que solo quiere saber de qué venían hablando.
+            if not isinstance(contenido, str) or not contenido.strip():
+                continue
+            quien = "Cliente" if turno.get("role") == "user" else "Bot"
+            lineas.append(f"· {quien}: {contenido.strip()}")
+        return lineas[-turnos:]
+
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
         try:
             if name == "identificar_cliente":
@@ -375,15 +490,8 @@ class SoporteAgent(BaseAgent):
 
             if name == "escalar_a_humano":
                 motivo = tool_input.get("motivo", "(sin especificar)")
-                logger.info("Escalamiento solicitado (%s): %s", caller_phone, motivo)
                 return json.dumps(
-                    {
-                        "escalado": True,
-                        "mensaje": (
-                            "Un asesor de Intergranel continuará la atención en breve."
-                        ),
-                    },
-                    ensure_ascii=False,
+                    await self._escalar(caller_phone, motivo), ensure_ascii=False
                 )
 
             if name in TOOLS_CON_SESION:

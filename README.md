@@ -30,6 +30,8 @@ ERP (evento de orden) ─▶ POST /webhooks/erp/order-update ─▶ plantilla/te
 | `app/replies.py` | Respuestas con botones, dentro de los topes de Meta |
 | `app/menus.py` | Menú del autoservicio del cliente |
 | `app/sesiones.py` | Sesión del cliente identificado |
+| `app/chatwoot.py` | Bandeja donde atiende un asesor humano |
+| `app/handoff.py` | Quién está con un asesor y no con el bot |
 | `app/erp.py` | Cliente del ERP (HTTP real + mock) |
 | `app/notifications.py` | Notificaciones proactivas de órdenes |
 | `app/config.py` | Configuración por variables de entorno |
@@ -100,6 +102,10 @@ Para el **autoservicio del cliente** (que consulte lo suyo identificándose con
 su nombre o razón social y su RFC) el contrato es aparte, con su propia sesión;
 está completo en
 [`docs/erp/AUTOSERVICIO_CLIENTES.md`](docs/erp/AUTOSERVICIO_CLIENTES.md).
+
+El **paso a un asesor humano** no va por el ERP sino por Chatwoot: qué crear en
+la instancia y por qué el bot conserva el número de WhatsApp está en
+[`docs/CHATWOOT_HANDOFF.md`](docs/CHATWOOT_HANDOFF.md).
 
 El formato de cada orden es el modelo `Order` de `app/models.py`. En el ERP de
 Intergranel (NestJS), la "orden del cliente" corresponde a un **Contrato**

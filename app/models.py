@@ -239,3 +239,53 @@ class CustomerSummary(BaseModel):
     facturas_pendientes: int = 0
     saldo: float = 0.0
     saldo_vencido: float = 0.0
+
+
+class ChatwootEvent(BaseModel):
+    """Lo que Chatwoot manda a /webhooks/chatwoot.
+
+    El payload cambia de forma entre versiones de Chatwoot y entre eventos, así
+    que aquí todo es opcional y la lectura va por propiedades. Dos rarezas que
+    conviene tener presentes:
+
+    - En `message_created` el id de la conversación viene anidado
+      (`conversation.id`), pero en `conversation_status_changed` el `id` de
+      arriba YA es el de la conversación.
+    - `message_type` a veces es el string "outgoing" y a veces el entero 1.
+    """
+
+    event: str = ""
+    id: int | None = None
+    content: str | None = None
+    message_type: str | int | None = None
+    private: bool = False
+    status: str | None = None
+    conversation: dict | None = None
+
+    @property
+    def conversacion_id(self) -> int | None:
+        anidado = (self.conversation or {}).get("id")
+        if anidado is not None:
+            return int(anidado)
+        # Solo para los eventos de conversación: en los de mensaje, `id` es del
+        # mensaje y confundirlos mandaría la respuesta al teléfono equivocado.
+        if self.event.startswith("conversation") and self.id is not None:
+            return int(self.id)
+        return None
+
+    @property
+    def es_del_asesor(self) -> bool:
+        """True si lo escribió una persona del equipo y el cliente debe verlo.
+
+        Las notas privadas quedan fuera (son para el equipo) y los entrantes
+        también: esos los publicó el propio bot al reenviar lo que dijo el
+        cliente, y devolvérselos sería un eco infinito.
+        """
+        if self.private:
+            return False
+        tipo = self.message_type
+        return tipo in ("outgoing", 1)
+
+    @property
+    def conversacion_resuelta(self) -> bool:
+        return self.event == "conversation_status_changed" and self.status == "resolved"

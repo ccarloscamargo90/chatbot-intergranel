@@ -74,6 +74,30 @@ class Settings(BaseSettings):
     # se aplica restricción (modo desarrollo).
     compras_phones_allowed: str = ""
 
+    # --- Chatwoot: la bandeja donde atiende un asesor humano ---
+    # Cuando el cliente pide una persona, la conversación pasa a Chatwoot y el
+    # bot se vuelve un cable entre WhatsApp y esa bandeja.
+    #
+    # El bot CONSERVA el número de WhatsApp (no se le cede a Chatwoot) porque
+    # Chatwoot no manda mensajes interactivos por la Cloud API: cederle el
+    # número cambiaría los menús de botones por texto plano en todas las
+    # conversaciones para ganar comodidad solo en las que llegan a un asesor.
+    #
+    # Vacío = deshabilitado: escalar avisa que no se pudo y lo deja en el log.
+    # "mock" = Chatwoot simulado en memoria (desarrollo).
+    chatwoot_base_url: str = ""
+    chatwoot_api_token: str = ""
+    chatwoot_account_id: int = 0
+    chatwoot_inbox_id: int = 0
+    # Secreto compartido que Chatwoot manda en el webhook de vuelta. Chatwoot no
+    # firma sus webhooks, así que sin esto cualquiera podría hacerle decir al bot
+    # lo que quisiera por WhatsApp. Vacío = sin verificar (solo desarrollo).
+    chatwoot_webhook_secret: str = ""
+    # Cuánto dura como mucho una conversación en manos del asesor. Existe para
+    # que nadie se quede hablándole al vacío si la conversación no se resuelve:
+    # al vencer, el bot retoma. Un turno de trabajo por defecto.
+    handoff_ttl_seconds: int = 8 * 60 * 60
+
     # --- Alertas de inventario ---
     # Teléfonos del equipo que reciben las alertas proactivas de inventario,
     # en formato internacional sin '+', separados por comas. Si se deja vacía,

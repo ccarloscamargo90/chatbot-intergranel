@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 
 from .bus import get_event_bus
+from .chatwoot import ChatwootNoDisponible, get_chatwoot_client
 from .config import get_settings
 from .dedup import get_dedup_store
-from .models import ErpAvisoEvent, InventoryAlertEvent, OrderEvent
+from .handoff import HandoffStore
+from .menus import BOTONES_SEGUIMIENTO
+from .models import ChatwootEvent, ErpAvisoEvent, InventoryAlertEvent, OrderEvent
 from .notifications import notify_erp_aviso, notify_inventory_alert, notify_order_event
+from .replies import Reply
 from .router import Router
 from .whatsapp import WhatsAppClient, verify_signature
 
@@ -25,6 +30,8 @@ app = FastAPI(title="Intergranel · Asistente de WhatsApp")
 wa = WhatsAppClient()
 router = Router()
 dedup = get_dedup_store()
+chatwoot = get_chatwoot_client()
+handoff = HandoffStore()
 
 
 @app.get("/")
@@ -35,6 +42,7 @@ async def health() -> dict:
         "erp": "mock" if settings.use_mock_erp else "http",
         "history": "redis" if settings.redis_url else "memory",
         "model": settings.claude_model,
+        "asesor": "chatwoot" if chatwoot.habilitado else "sin configurar",
     }
 
 
@@ -139,6 +147,42 @@ def _texto_interactivo(message: dict) -> str | None:
     return boton_id or (respuesta.get("title") or "").strip() or None
 
 
+def _texto_para_el_asesor(message: dict) -> str:
+    """Lo que dijo el cliente, en texto plano para la bandeja del asesor.
+
+    Chatwoot recibe texto; una imagen o un PDF se anuncian en vez de subirse.
+    Es una pérdida consciente: el asesor sabe que llegó un archivo y puede
+    pedírselo, que es mucho mejor que no enterarse de que existe.
+    """
+    mtype = message.get("type")
+    if mtype == "text":
+        return message.get("text", {}).get("body", "")
+    if mtype == "interactive":
+        seleccion = _texto_interactivo(message) or ""
+        return f"[tocó una opción del menú: {seleccion}]" if seleccion else "[tocó una opción]"
+    if mtype in ("image", "document", "audio", "video", "sticker"):
+        pie = (message.get(mtype, {}) or {}).get("caption") or ""
+        etiqueta = f"[el cliente envió un archivo: {mtype}]"
+        return f"{etiqueta} {pie}".strip()
+    return f"[mensaje de tipo {mtype}, no soportado por el bot]"
+
+
+async def _reenviar_al_asesor(activo, message: dict, phone: str) -> None:
+    """Pasa a Chatwoot lo que escribió el cliente durante el handoff."""
+    texto = _texto_para_el_asesor(message)
+    try:
+        await chatwoot.mensaje_del_cliente(activo.conversacion_id, texto)
+    except ChatwootNoDisponible:
+        # Si el mensaje no llegó a la bandeja, nadie lo va a leer. Decírselo es
+        # mejor que dejarlo creyendo que un asesor lo está viendo.
+        logger.exception("No se pudo reenviar a Chatwoot el mensaje de %s", phone)
+        await wa.send_text(
+            phone,
+            "No logramos entregar su mensaje al asesor. ¿Puede intentarlo de "
+            "nuevo en un momento?",
+        )
+
+
 async def _process_message(message: dict) -> None:
     phone = message.get("from")
     if not phone:
@@ -149,6 +193,15 @@ async def _process_message(message: dict) -> None:
         logger.info("Mensaje duplicado ignorado: %s", message_id)
         return
     try:
+        # ¿Este teléfono está con un asesor? Entonces el bot no contesta: lo que
+        # diga el cliente va a la bandeja donde está la persona que lo atiende.
+        # Va ANTES de mirar el tipo de mensaje para que también se reenvíen los
+        # toques de botón que hayan quedado en pantalla del turno anterior.
+        activo = await handoff.por_telefono(phone)
+        if activo is not None:
+            await _reenviar_al_asesor(activo, message, phone)
+            return
+
         mtype = message.get("type")
         if mtype == "text":
             text = message["text"]["body"]
@@ -323,3 +376,83 @@ async def erp_notificacion(
 
     return {"status": "sent", "wamid": _wamid(resultado), "result": resultado}
 
+
+# --------------------------------------------------------------------------- #
+# Chatwoot: lo que escribe el asesor -> WhatsApp del cliente.
+#
+# Es el sentido de vuelta del handoff. El de ida vive en `_process_message`:
+# mientras el teléfono está en handoff, lo que dice el cliente se reenvía a la
+# conversación de Chatwoot en vez de ir al agente.
+# --------------------------------------------------------------------------- #
+@app.post("/webhooks/chatwoot")
+async def chatwoot_webhook(
+    event: ChatwootEvent,
+    request: Request,
+    x_webhook_secret: str = Header(default=""),
+) -> dict:
+    # Chatwoot NO firma sus webhooks. Sin un secreto compartido, cualquiera que
+    # descubra esta URL puede hacerle decir al bot lo que quiera por WhatsApp,
+    # a nombre de la empresa. El header es lo preferible; el query param existe
+    # porque la UI de Chatwoot solo deja capturar una URL.
+    if settings.chatwoot_webhook_secret:
+        recibido = x_webhook_secret or request.query_params.get("secret", "")
+        if not hmac.compare_digest(recibido, settings.chatwoot_webhook_secret):
+            raise HTTPException(status_code=401, detail="Secreto inválido")
+
+    conversacion_id = event.conversacion_id
+    if conversacion_id is None:
+        return {"status": "ignored", "motivo": "sin conversación"}
+
+    activo = await handoff.por_conversacion(conversacion_id)
+    if activo is None:
+        # Conversación que no abrió el bot, o handoff ya vencido/cerrado.
+        return {"status": "ignored", "motivo": "sin handoff"}
+
+    # El asesor cerró el caso: el bot retoma ese teléfono.
+    if event.conversacion_resuelta:
+        await handoff.cerrar(activo)
+        logger.info("Handoff de %s cerrado tras %s min", activo.telefono, activo.minutos)
+        await wa.send_reply(
+            activo.telefono,
+            Reply(
+                texto="Quedamos atentos. ¿Puedo ayudarle en algo más? 🌾",
+                botones=list(BOTONES_SEGUIMIENTO),
+            ),
+        )
+        return {"status": "closed"}
+
+    if not event.es_del_asesor:
+        # Nota privada, o el eco de lo que el propio bot acaba de publicar.
+        return {"status": "ignored", "motivo": "no es del asesor"}
+
+    contenido = (event.content or "").strip()
+    if not contenido:
+        return {"status": "ignored", "motivo": "sin contenido"}
+
+    # Chatwoot reintenta ante un timeout: el cliente no puede recibir dos veces
+    # el mismo mensaje del asesor.
+    if event.id is not None and await dedup.is_duplicate(f"chatwoot:{event.id}"):
+        return {"status": "duplicate"}
+
+    try:
+        await wa.send_text(activo.telefono, contenido)
+    except Exception as exc:  # noqa: BLE001 - el asesor tiene que enterarse
+        # El caso típico: pasaron más de 24h desde el último mensaje del cliente
+        # y Meta rechaza el texto libre. El asesor lo ve entregado en Chatwoot y
+        # no lo está; por eso se lo decimos ahí mismo, en su propia bandeja.
+        motivo = _detalle_error(exc)
+        logger.error("No se entregó a %s la respuesta del asesor: %s", activo.telefono, motivo)
+        if event.id is not None:
+            await dedup.release(f"chatwoot:{event.id}")
+        try:
+            await chatwoot.nota_privada(
+                conversacion_id,
+                f"⚠️ WhatsApp NO entregó este mensaje: {motivo}\n"
+                "Si pasaron más de 24 h desde el último mensaje del cliente, "
+                "Meta rechaza el texto libre y hay que reabrir con una plantilla.",
+            )
+        except ChatwootNoDisponible:
+            logger.exception("Tampoco se pudo avisar del fallo en Chatwoot")
+        return {"status": "failed", "error": motivo}
+
+    return {"status": "sent"}
