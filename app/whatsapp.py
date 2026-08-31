@@ -29,13 +29,34 @@ def verify_signature(payload: bytes, header: str | None, app_secret: str) -> boo
     return hmac.compare_digest(digest, expected)
 
 
+# Meta acepta una lista CERRADA de MIME para documentos: PDF, los de Office y
+# text/plain. `application/xml` no está en ella, así que la Media API rechaza el
+# archivo y el envío se cae entero — y el XML del CFDI es justo el que el
+# contador necesita.
+#
+# Se sube como `text/plain` (que es lo que un XML es: texto) conservando el
+# nombre `.xml`. El nombre es lo que decide con qué extensión le queda guardado
+# al cliente en el teléfono, así que el archivo sigue abriendo como XML.
+#
+# Esto NO se podía atrapar con las pruebas: mockean a Meta, y un mock acepta
+# cualquier MIME. Se descubrió cuando a un cliente real no le llegó nada.
+MIME_PARA_META: dict[str, str] = {
+    "application/xml": "text/plain",
+    "text/xml": "text/plain",
+}
+
+
 class WhatsAppClient:
-    def __init__(self) -> None:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         settings = get_settings()
         self._token = settings.whatsapp_token
         self._graph = f"https://graph.facebook.com/{settings.whatsapp_api_version}"
         self._phone_number_id = settings.whatsapp_phone_number_id
         self._url = f"{self._graph}/{self._phone_number_id}/messages"
+        # Inyectable en pruebas, como en `HTTPERPClient`: sin esto, lo único
+        # que se puede probar de un envío es el modo desarrollo — que acepta
+        # cualquier MIME y por eso no vio que Meta rechaza `application/xml`.
+        self._transport = transport
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -49,7 +70,7 @@ class WhatsAppClient:
             # Modo desarrollo sin credenciales: registramos en vez de enviar.
             logger.info("[WhatsApp DEV] %s", payload)
             return {"dev": True, "payload": payload}
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, transport=self._transport) as client:
             resp = await client.post(self._url, headers=self._headers, json=payload)
             if resp.status_code >= 400:
                 logger.error("Error WhatsApp %s: %s", resp.status_code, resp.text)
@@ -171,19 +192,29 @@ class WhatsAppClient:
         esa URL no existe nunca.
 
         El id vive 30 días del lado de Meta; aquí se usa de inmediato.
+
+        El MIME se traduce por `MIME_PARA_META`: la lista de Meta es cerrada y
+        no incluye `application/xml`. El nombre del archivo no se toca.
         """
+        mime_meta = MIME_PARA_META.get(mime_type, mime_type)
         if not self._token:
             logger.info("[WhatsApp DEV] upload_media %s (%s bytes)", filename, len(contenido))
             return f"dev-media-{filename}"
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
             resp = await client.post(
                 f"{self._graph}/{self._phone_number_id}/media",
                 headers={"Authorization": f"Bearer {self._token}"},
-                data={"messaging_product": "whatsapp", "type": mime_type},
-                files={"file": (filename, contenido, mime_type)},
+                data={"messaging_product": "whatsapp", "type": mime_meta},
+                files={"file": (filename, contenido, mime_meta)},
             )
             if resp.status_code >= 400:
-                logger.error("Error subiendo media %s: %s", resp.status_code, resp.text)
+                logger.error(
+                    "Error subiendo media %s (%s como %s): %s",
+                    resp.status_code,
+                    filename,
+                    mime_meta,
+                    resp.text,
+                )
             resp.raise_for_status()
             return resp.json()["id"]
 

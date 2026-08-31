@@ -27,7 +27,8 @@ import json
 import logging
 
 from ..chatwoot import ChatwootClient, ChatwootNoDisponible, get_chatwoot_client
-from ..erp import SesionClienteInvalida
+from ..erp import DocumentoNoRecuperable, DocumentoSinArchivo, SesionClienteInvalida
+from ..errores import AUTO, detalle_http
 from ..handoff import HandoffStore
 from ..menus import BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
 from ..replies import Reply
@@ -79,6 +80,16 @@ a `enviar_mi_documento`): el PDF es el legible, el XML es el que vale \
 fiscalmente y el que necesita su contador. Solo manda uno si lo pidió así.
 - Los documentos ya salieron cuando la herramienta responde `enviado: true`: no \
 digas "se lo voy a enviar", di que ya se lo mandaste, en una línea.
+- Si `enviar_mi_documento` responde `enviado: false`, la razón está en `motivo` y \
+NO son la misma: `no_esta_en_su_cuenta` (no es suyo), `sin_archivo_cargado` (SÍ \
+es suyo, pero nadie subió el archivo al sistema) y `archivo_no_recuperable` o \
+`fallo_al_enviar` (falla nuestra). Sigue la `instruccion` de la respuesta al pie \
+de la letra y NO las mezcles: decirle "no aparece en su cuenta" a alguien a \
+quien acabas de listarle esa factura es contradecirte.
+- **Nunca expliques un fallo con una causa que no venga en la respuesta de la \
+herramienta.** Si no sabes por qué falló, dilo así: "no pude enviarlo y no \
+tengo el detalle". Inventar un culpable —"el módulo de envío", "el sistema \
+está caído"— suena convincente y manda a alguien a buscar donde no es.
 - Usa `escalar_a_humano` si el cliente está molesto, tiene un reclamo, pide algo \
 fuera de tu alcance (cambiar precios, cancelar, renegociar) o pide una persona. \
 No requiere identificación. Escalar es DEFINITIVO en ese turno: a partir de ahí \
@@ -552,7 +563,44 @@ class SoporteAgent(BaseAgent):
                 "instruccion": "Pregúntale de qué folio quiere el documento.",
             }
 
-        documento = await self._erp.get_customer_document(sesion.token, tipo, folio)
+        try:
+            documento = await self._erp.get_customer_document(sesion.token, tipo, folio)
+        except DocumentoSinArchivo as exc:
+            # El cliente acaba de ver ese folio en su propia lista. Decirle que
+            # "no aparece en su cuenta" lo contradice de frente, y el modelo
+            # resuelve la contradicción inventando una causa.
+            logger.info("Documento sin archivo para %s (%s): %s", telefono, folio, exc)
+            return {
+                "enviado": False,
+                "motivo": "sin_archivo_cargado",
+                "folio": folio,
+                "instruccion": (
+                    "Dile con claridad que ese documento SÍ está en su cuenta "
+                    "pero todavía no tiene el archivo cargado en el sistema, así "
+                    "que no hay nada que enviarle. NO digas que no aparece en su "
+                    "cuenta ni que falló el envío. Ofrécele lo que sí le puedes "
+                    "mandar (su estado de cuenta) y pasarlo con un asesor para "
+                    "que se lo hagan llegar."
+                ),
+            }
+        except DocumentoNoRecuperable as exc:
+            # Problema nuestro. No se arregla reintentando, así que no se le
+            # sugiere al cliente que insista.
+            logger.error("No se pudo recuperar el documento %s: %s", folio, exc)
+            return {
+                "enviado": False,
+                "motivo": "archivo_no_recuperable",
+                "folio": folio,
+                "detalle": str(exc),
+                "instruccion": (
+                    "Dile que el documento sí es suyo pero que hubo un problema "
+                    "de NUESTRO lado al recuperar el archivo, y que ya quedó "
+                    "registrado. NO le digas que no aparece en su cuenta ni que "
+                    "vuelva a intentarlo en unos minutos. Ofrécele pasarlo con "
+                    "un asesor."
+                ),
+            }
+
         if documento is None:
             # Mismo "no aparece" exista o no el documento de otro cliente.
             return {
@@ -566,10 +614,29 @@ class SoporteAgent(BaseAgent):
                 ),
             }
 
-        media_id = await self._wa.upload_media(
-            documento.contenido, documento.nombre, documento.tipo_mime
-        )
-        await self._wa.send_document(telefono, media_id, documento.nombre)
+        try:
+            media_id = await self._wa.upload_media(
+                documento.contenido, documento.nombre, documento.tipo_mime
+            )
+            await self._wa.send_document(telefono, media_id, documento.nombre)
+        except Exception as exc:  # noqa: BLE001 - el motivo real, no "hubo un error"
+            # Aquí sí falló el envío, y es lo único que autoriza a decirlo. El
+            # detalle de Meta viaja en la respuesta de la tool para que quede en
+            # el historial: "Server error 500" no alcanza para arreglar nada.
+            motivo = detalle_http(exc, "Meta")
+            logger.error("No se pudo enviar %s a %s: %s", documento.nombre, telefono, motivo)
+            return {
+                "enviado": False,
+                "motivo": "fallo_al_enviar",
+                "documento": documento.nombre,
+                "detalle": motivo,
+                "instruccion": (
+                    "Dile que el documento existe y es suyo, pero que no se pudo "
+                    "entregar por WhatsApp en este momento, y ofrécele un asesor. "
+                    "NO repitas el detalle técnico."
+                ),
+            }
+
         return {"enviado": True, "documento": documento.nombre}
 
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
@@ -622,5 +689,21 @@ class SoporteAgent(BaseAgent):
 
             return json.dumps({"error": f"herramienta desconocida: {name}"})
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Error ejecutando herramienta %s", name)
-            return json.dumps({"error": str(exc)})
+            # `str(HTTPStatusError)` dice "Server error '503' for url ..." y tira
+            # el mensaje del ERP, que es el único que explica qué pasó. Lo que se
+            # devuelve aquí es además lo único que el modelo tiene para
+            # contestarle al cliente: con un mensaje mudo, rellena el hueco.
+            motivo = detalle_http(exc, AUTO)
+            logger.exception("Error ejecutando herramienta %s: %s", name, motivo)
+            return json.dumps(
+                {
+                    "error": motivo,
+                    "instruccion": (
+                        "Hubo una falla técnica de nuestro lado. Dilo sin "
+                        "detalles y ofrécele un asesor. NO afirmes nada sobre "
+                        "los datos del cliente que no hayas obtenido de una "
+                        "herramienta."
+                    ),
+                },
+                ensure_ascii=False,
+            )

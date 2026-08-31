@@ -159,6 +159,36 @@ Un archivo cuya URL guardada no apunte al bucket del ERP no se sirve
 (`keyFromUrl` devuelve null): si no, el endpoint sería un proxy de salida hacia
 donde alguien haya escrito esa columna.
 
+#### Cuando no sale: cuatro respuestas, no una
+
+| Status | Código (`error`) | Qué pasó | Qué hace el bot |
+|---|---|---|---|
+| 400 | — | Falta `?folio=`, o el tipo no existe | Pide el folio |
+| 404 | — | No está entre los suyos (exista o no) | "No aparece en su cuenta" |
+| 409 | `DocumentoSinArchivo` | Es suyo, pero nunca se le cargó archivo | Lo dice tal cual |
+| 503 | `ArchivoNoRecuperable` | Es suyo, hay archivo, no se pudo bajar | "Problema nuestro" |
+
+**Sólo el 404 tiene que ser opaco.** Distinguir "no existe" de "existe pero es
+de otro" convertiría el endpoint en un verificador de folios ajenos. Los otros
+tres no protegen nada: el cliente acaba de ver ese folio en su propia lista.
+
+Que los cuatro compartieran status es lo que rompió en producción. Un cliente
+pidió sus dos facturas —las mismas que el bot acababa de listarle— y ninguna
+tenía CFDI adjunto (capturadas a mano, que es lo normal en `Factura`: `pdfUrl`
+y `xmlUrl` son opcionales). El bot recibió el mismo 404 que para una factura
+ajena, no podía decirle "no aparece en su cuenta" sin contradecir la lista que
+él mismo había mandado, y resolvió la contradicción inventando: *"es el módulo
+de envío el que no las está entregando"*. No lo era. Un mensaje inventado manda
+a alguien a buscar donde no es; uno incómodo, no.
+
+El código va en el campo `error` del cuerpo (el filtro global de Nest lo
+conserva) y no en el status, porque un mismo status llega por varias razones: un
+503 es tanto "no bajé el archivo" como "la base no responde", y el bot tiene que
+contestar distinto en cada caso.
+
+El detalle del `ArchivoNoRecuperable` —la llave, el bucket, el error del SDK—
+se queda en el log del backend. Al cliente no le sirve y al operador sí.
+
 **401** significa una sola cosa: la sesión expiró o se cerró. El bot lo traduce
 a "su sesión caducó por seguridad, identifíquese de nuevo" y borra su copia
 local del token — no a "hubo un problema técnico".
