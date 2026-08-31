@@ -37,6 +37,8 @@ from .models import (
     CustomerInvoice,
     CustomerOrder,
     CustomerSummary,
+    DepositoRespuestaFlete,
+    InterpretacionFlete,
     InventoryItem,
     Order,
     OrderLine,
@@ -167,6 +169,19 @@ class ERPClient(abc.ABC):
     @abc.abstractmethod
     async def close_customer_session(self, token: str) -> None:
         """Cierra la sesión de autoservicio (idempotente)."""
+
+    # --- Cotización de fletes (BUG-77) ------------------------------------ #
+    @abc.abstractmethod
+    async def depositar_respuesta_flete(
+        self,
+        wamid: str,
+        telefono: str,
+        texto: str,
+        referencia: str | None = None,
+        interpretacion: InterpretacionFlete | None = None,
+    ) -> DepositoRespuestaFlete:
+        """Deposita lo que contestó un transportista: el texto crudo y, aparte,
+        lo que el bot entendió. Idempotente por `wamid`."""
 
 
 class HTTPERPClient(ERPClient):
@@ -405,6 +420,29 @@ class HTTPERPClient(ERPClient):
                 return
             resp.raise_for_status()
 
+    async def depositar_respuesta_flete(
+        self,
+        wamid: str,
+        telefono: str,
+        texto: str,
+        referencia: str | None = None,
+        interpretacion: InterpretacionFlete | None = None,
+    ) -> DepositoRespuestaFlete:
+        cuerpo: dict = {"wamid": wamid, "telefono": telefono, "texto": texto}
+        if referencia:
+            cuerpo["referencia"] = referencia
+        if interpretacion is not None:
+            # `exclude_none`: lo que el transportista no aclaró se OMITE. Mandar
+            # `null` explícito daría igual hoy, pero omitirlo deja escrito en el
+            # contrato que ausente y `false` no son lo mismo.
+            cuerpo["interpretacion"] = interpretacion.model_dump(exclude_none=True)
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/cotizaciones-flete/respuesta", json=cuerpo
+            )
+            resp.raise_for_status()
+            return DepositoRespuestaFlete(**resp.json())
+
 
 # Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
 _MOCK_PRECIOS = {
@@ -561,6 +599,10 @@ class MockERPClient(ERPClient):
         # token -> {telefono, expira}. Espejo en memoria de lo que en el ERP
         # real es una tabla con el token hasheado.
         self._sesiones: dict[str, dict] = {}
+        # Lo que se ha depositado de cotización de fletes, para que las pruebas
+        # puedan mirarlo; y los wamid ya vistos, que es como el ERP deduplica.
+        self.respuestas_flete: list[dict] = []
+        self._wamids_flete: set[str] = set()
         self._orders: dict[str, Order] = {
             "CONT-2026-0001": Order(
                 id="CONT-2026-0001",
@@ -835,6 +877,39 @@ class MockERPClient(ERPClient):
 
     async def close_customer_session(self, token: str) -> None:
         self._sesiones.pop(token, None)
+
+    async def depositar_respuesta_flete(
+        self,
+        wamid: str,
+        telefono: str,
+        texto: str,
+        referencia: str | None = None,
+        interpretacion: InterpretacionFlete | None = None,
+    ) -> DepositoRespuestaFlete:
+        # El mock guarda lo depositado para que las pruebas puedan mirarlo, y
+        # replica lo que hace el ERP: con referencia hay certeza, sin ella se
+        # infiere por el teléfono.
+        self.respuestas_flete.append(
+            {
+                "wamid": wamid,
+                "telefono": telefono,
+                "texto": texto,
+                "referencia": referencia,
+                "interpretacion": interpretacion,
+            }
+        )
+        if wamid in self._wamids_flete:
+            return DepositoRespuestaFlete(id="dup", atribucion="REFERENCIA", duplicado=True)
+        self._wamids_flete.add(wamid)
+        sin_precio = interpretacion is None or (
+            interpretacion.montoCentavos is None and not interpretacion.declina
+        )
+        return DepositoRespuestaFlete(
+            id=f"resp-{len(self.respuestas_flete)}",
+            atribucion="REFERENCIA" if referencia else "TELEFONO_UNICO",
+            cotizacionId=(referencia or "").replace("cotizacion_flete:", "") or "c1",
+            requiereRevision=sin_precio,
+        )
 
 
 def get_erp_client() -> ERPClient:

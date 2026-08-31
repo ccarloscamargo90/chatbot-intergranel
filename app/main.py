@@ -13,6 +13,13 @@ from .bus import get_event_bus
 from .chatwoot import ChatwootNoDisponible, get_chatwoot_client
 from .config import get_settings
 from .dedup import get_dedup_store
+from .erp import get_erp_client
+from .fletes import (
+    FletesPendientes,
+    acuse,
+    es_solicitud_de_flete,
+    interpretar_respuesta,
+)
 from .handoff import HandoffStore
 from .menus import BOTONES_SEGUIMIENTO
 from .models import ChatwootEvent, ErpAvisoEvent, InventoryAlertEvent, OrderEvent
@@ -30,6 +37,8 @@ app = FastAPI(title="Intergranel · Asistente de WhatsApp")
 wa = WhatsAppClient()
 router = Router()
 dedup = get_dedup_store()
+erp = get_erp_client()
+fletes = FletesPendientes(get_event_bus())
 chatwoot = get_chatwoot_client()
 handoff = HandoffStore()
 
@@ -183,6 +192,49 @@ async def _reenviar_al_asesor(activo, message: dict, phone: str) -> None:
         )
 
 
+async def _capturar_flete(phone: str, message_id: str | None, texto: str) -> bool:
+    """Si a este teléfono le pedimos precio, deposita su respuesta en el ERP.
+
+    Devuelve True cuando el mensaje se consumió aquí. El ERP guarda SIEMPRE el
+    texto crudo —aunque nadie lo haya entendido— y él decide a qué cotización
+    pertenece: aquí no se adivina nada.
+
+    El pendiente se limpia solo cuando la respuesta trae precio o es una
+    negativa. Mientras no la traiga, el teléfono sigue marcado: alguien a quien
+    le preguntamos un precio y contesta "¿cuántas toneladas?" sigue en esa
+    conversación, no en una nueva.
+    """
+    pendiente = await fletes.obtener(phone)
+    if pendiente is None:
+        return False
+
+    interpretacion = await interpretar_respuesta(
+        router.client, get_settings().claude_model, texto
+    )
+    try:
+        await erp.depositar_respuesta_flete(
+            wamid=message_id or f"local:{phone}:{hash(texto)}",
+            telefono=phone,
+            texto=texto,
+            referencia=pendiente.referencia,
+            interpretacion=interpretacion,
+        )
+    except Exception:  # noqa: BLE001 - el transportista no tiene la culpa
+        logger.exception("No se pudo depositar la respuesta de flete de %s", phone)
+        await wa.send_text(
+            phone, "Gracias. Recibimos su mensaje y lo estamos revisando."
+        )
+        return True
+
+    if interpretacion is not None and (
+        interpretacion.montoCentavos is not None or interpretacion.declina
+    ):
+        await fletes.limpiar(phone)
+
+    await wa.send_text(phone, acuse(interpretacion))
+    return True
+
+
 async def _process_message(message: dict) -> None:
     phone = message.get("from")
     if not phone:
@@ -205,6 +257,12 @@ async def _process_message(message: dict) -> None:
         mtype = message.get("type")
         if mtype == "text":
             text = message["text"]["body"]
+            # ¿A este número le pedimos precio de un flete? Entonces lo que
+            # escriba es una COTIZACIÓN, no una consulta: se deposita en el ERP
+            # con su texto crudo. Mandarlo al agente de ventas le contestaría
+            # sobre precios de grano a alguien que está ofreciendo un camión.
+            if await _capturar_flete(phone, message_id, text):
+                return
             reply = await router.route(phone, text)
             await wa.send_reply(phone, reply)
             return
@@ -359,7 +417,19 @@ async def erp_notificacion(
     )
 
     try:
-        resultado = await notify_erp_aviso(wa, event)
+        if es_solicitud_de_flete(event.tipo):
+            # Hacia un TRANSPORTISTA, no hacia el equipo. Sale el texto del ERP
+            # TAL CUAL: `notify_erp_aviso` lo metería en la plantilla de avisos
+            # internos, que firma con `event.empresa or settings.company_name`
+            # — y ese fallback volvería a meter la marca comercial que el ERP le
+            # quitó a propósito antes de mandárselo a un proveedor.
+            resultado = await wa.send_text(event.telefono, event.mensaje)
+            # Se marca el teléfono para poder amarrar su respuesta después: un
+            # transportista contesta "28 mil" tres horas más tarde, sin citar
+            # nada, y sin esto no se sabría de qué viaje habla.
+            await fletes.marcar(event.telefono, event.referencia, event.id)
+        else:
+            resultado = await notify_erp_aviso(wa, event)
     except Exception as exc:  # noqa: BLE001 - cualquier fallo tiene que soltar la marca
         # El aviso NO salió. Si la marca de deduplicación se queda puesta, el
         # reintento del ERP entra por la rama de "duplicate", que el ERP trata
