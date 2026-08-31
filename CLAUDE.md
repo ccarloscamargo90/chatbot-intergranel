@@ -37,13 +37,15 @@ app/
     soporte.py          ← Atención al cliente + autoservicio (identificación por RFC)
   assistant.py          ← Wrapper compat para tests legacy
   errores.py           ← El motivo REAL de un fallo HTTP (Meta o ERP), no el status
+  fletes.py            ← Cotización de fletes: salida al transportista e
+                          interpretación de su respuesta (ERP · BUG-77)
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
 tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
-  test_chatwoot.py, test_documentos.py
+  test_chatwoot.py, test_documentos.py, test_fletes.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -240,7 +242,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 227 tests pasando
+pytest -q                  # 249 tests pasando
 ```
 
 ## Estado actual y fases
@@ -353,6 +355,58 @@ Endpoints que el ERP expone (ya implementados en `ERP-INTERGRANEL`):
 
 Contrato completo (incluida la nota honesta sobre la fuerza de la
 identificación) en `docs/erp/AUTOSERVICIO_CLIENTES.md`.
+
+### Fase 7 ✅ — Cotización de fletes a transportistas (ERP · BUG-77)
+Completada. El ERP arma la solicitud, decide a quién se le pregunta y hace
+cumplir el tope por transportista y por día. El bot hace las dos cosas que el
+ERP no puede: **mandar el mensaje** y **entender la respuesta**. Todo vive en
+`app/fletes.py`.
+
+**Salida.** La solicitud llega por el MISMO webhook que los avisos internos
+(`POST /webhooks/erp/notificacion`) pero con `tipo: cotizacion_flete.solicitud`,
+y toma otro camino: se manda **el texto del ERP tal cual**, con `send_text`.
+
+No es un detalle de estilo. `notify_erp_aviso` firma con
+`event.empresa or settings.company_name`, y el ERP manda `empresa: null` a
+propósito porque un transportista es un PROVEEDOR: ese fallback volvería a meter
+la marca comercial que el ERP le quitó antes de mandársela. La regla de oro de
+GRANCORE aplica igual de este lado, y `test_fletes.py` la hace cumplir.
+
+Al mandar, el teléfono queda marcado en el bus
+(`bus:flete:pendiente:{telefono}`, TTL 3 días) con la referencia
+`cotizacion_flete:<id>` que viajó en el mensaje.
+
+**Entrada.** Mientras ese teléfono esté marcado, lo que escriba NO va al router:
+va a `_capturar_flete`. Mandarlo al agente de ventas le contestaría sobre
+precios de grano a alguien que está ofreciendo un camión.
+
+La respuesta se interpreta con el modelo de los AGENTES, no con el clasificador
+rápido del router: clasificar mal manda una conversación al agente equivocado y
+se corrige al siguiente mensaje; leer mal un precio mete un número que se
+compara contra otros, se elige y se paga. Se le piden PESOS al modelo y se
+convierten a centavos en código — pedirle centavos invita a un error de x100.
+
+Lo que se entiende viaja al ERP **junto con el texto crudo**, nunca en su lugar:
+
+```
+POST /api/v1/bot/cotizaciones-flete/respuesta
+{ wamid, telefono, texto, referencia?, interpretacion? }
+```
+
+Tres cosas que conviene no romper:
+
+- **Lo que no se entiende se deposita igual.** Que un transportista contestó es
+  un hecho; el ERP lo marca para revisión humana. Si el ERP está caído, el
+  transportista recibe acuse de todas formas: no tiene la culpa.
+- **Un precio sin unidad no es un precio.** "28 mil" sin decir de qué no se
+  puede comparar contra nada, así que se deja sin monto en vez de entrar a la
+  comparativa con una unidad supuesta.
+- **El pendiente se limpia solo con precio o negativa.** Quien contesta
+  "¿cuántas toneladas?" sigue en la misma conversación, no en una nueva.
+
+Se extendió `ERPClient` con `depositar_respuesta_flete` (abstracto + HTTP +
+mock) y se añadieron los modelos `SolicitudFletePendiente`,
+`InterpretacionFlete` y `DepositoRespuestaFlete`.
 
 ## Especificación de agentes
 

@@ -302,3 +302,50 @@ class CustomerDocument(BaseModel):
     nombre: str
     tipo_mime: str
     contenido: bytes
+
+
+# --------------------------------------------------------------------------- #
+# Cotización de fletes (ERP · BUG-77)
+# --------------------------------------------------------------------------- #
+class SolicitudFletePendiente(BaseModel):
+    """Un transportista al que se le pidió precio y todavía no contesta.
+
+    Vive en el bus con TTL. Es lo que permite amarrar un "28 mil" suelto, horas
+    después y sin citar nada, con la cotización que lo estaba esperando.
+    """
+
+    telefono: str
+    # `cotizacion_flete:<id>`, la referencia que viajó en el mensaje saliente.
+    # Es CERTEZA: con ella el ERP no tiene que inferir por el número.
+    referencia: str | None = None
+    # Id del aviso del ERP que originó la pregunta.
+    aviso_id: str = ""
+
+
+class InterpretacionFlete(BaseModel):
+    """Lo que el bot ENTENDIÓ de la respuesta. Es una lectura, no un hecho.
+
+    Los nombres van en camelCase porque viajan tal cual al ERP, que es NestJS.
+    Todo es opcional: lo que el transportista no aclaró va en `null` y NUNCA en
+    `false` — "no lo dijo" y "no lo incluye" cuestan distinto.
+    """
+
+    montoCentavos: int | None = None
+    unidad: str | None = None
+    capacidadToneladas: float | None = None
+    incluyeManiobras: bool | None = None
+    incluyeCasetas: bool | None = None
+    disponibleDesde: str | None = None
+    declina: bool = False
+
+
+class DepositoRespuestaFlete(BaseModel):
+    """Lo que el ERP contesta al recibir la respuesta de un transportista."""
+
+    id: str = ""
+    # REFERENCIA · TELEFONO_UNICO · MANUAL · SIN_ATRIBUIR
+    atribucion: str = ""
+    motivo: str | None = None
+    cotizacionId: str | None = None
+    requiereRevision: bool = False
+    duplicado: bool = False
