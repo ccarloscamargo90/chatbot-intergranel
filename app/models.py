@@ -370,3 +370,50 @@ class DepositoRespuestaFlete(BaseModel):
     cotizacionId: str | None = None
     requiereRevision: bool = False
     duplicado: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# Autoservicio del PROVEEDOR
+#
+# Nada de lo que viaja aquí lleva marca propia: un proveedor no debe saber bajo
+# qué marca se revende lo que nos vende.
+# --------------------------------------------------------------------------- #
+class SupplierSummary(BaseModel):
+    """Foto rápida de lo que se le debe al proveedor."""
+
+    proveedor: str = ""
+    moneda: str = "MXN"
+    ordenes_abiertas: int = 0
+    facturas_pendientes: int = 0
+    por_pagar: float = 0.0
+    vencido: float = 0.0
+
+
+class SupplierInvoice(BaseModel):
+    """Factura que el proveedor nos emitió, con lo que falta por pagarle.
+
+    `vencida` viene calculada del ERP: restar fechas es cómo el modelo termina
+    diciéndole a alguien que su pago está al corriente cuando lleva un mes.
+    """
+
+    id: str
+    uuid: str | None = None
+    fecha: str | None = None
+    fecha_vencimiento: str | None = None
+    total: float = 0.0
+    saldo: float = 0.0
+    moneda: str = "MXN"
+    estado: str = "pendiente"
+    vencida: bool = False
+
+
+class SupplierPurchaseOrder(BaseModel):
+    """Orden de compra que se le colocó al proveedor."""
+
+    id: str
+    fecha: str | None = None
+    fecha_entrega_estimada: str | None = None
+    producto: str = ""
+    toneladas: float = 0.0
+    total: float = 0.0
+    estado: str = "pendiente"

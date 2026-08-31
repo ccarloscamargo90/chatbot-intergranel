@@ -49,12 +49,20 @@ from .models import (
     PurchaseRequest,
     Quote,
     Supplier,
+    SupplierInvoice,
+    SupplierPurchaseOrder,
+    SupplierSummary,
 )
 
 # Header por el que viaja el token de la sesión de autoservicio del cliente.
 # El token NO va en la URL: los path params acaban en los logs de acceso del
 # proxy, y ahí quedaría escrito el pase de entrada a los datos de un cliente.
 SESION_HEADER = "X-Bot-Sesion"
+
+# El del PROVEEDOR va aparte. Los tokens viven en tablas distintas del ERP, así
+# que uno de cliente mandado aquí ya rebotaría; el header propio es la segunda
+# red: hace imposible mandar el equivocado sin que se note.
+SESION_PROVEEDOR_HEADER = "X-Bot-Sesion-Proveedor"
 
 
 class SesionClienteInvalida(Exception):
@@ -202,6 +210,34 @@ class ERPClient(abc.ABC):
         - `DocumentoNoRecuperable` — es suyo y debería tener archivo, pero no
           se pudo bajar.
         """
+
+    # --- Autoservicio del PROVEEDOR ---------------------------------------- #
+
+    @abc.abstractmethod
+    async def identify_supplier(
+        self, nombre: str, rfc: str, telefono: str
+    ) -> CustomerIdentification:
+        """Valida nombre + RFC de un PROVEEDOR y abre su sesión.
+
+        El RFC es obligatorio y no admite excepción: un proveedor extranjero
+        (sin RFC mexicano) no puede usar este canal, porque el RFC ES el
+        segundo factor."""
+
+    @abc.abstractmethod
+    async def get_supplier_summary(self, token: str) -> SupplierSummary:
+        """Cuánto se le debe al proveedor y qué trae en camino."""
+
+    @abc.abstractmethod
+    async def list_supplier_invoices(self, token: str) -> list[SupplierInvoice]:
+        """Sus facturas con lo que falta por pagarle, lo que vence primero arriba."""
+
+    @abc.abstractmethod
+    async def list_supplier_orders(self, token: str) -> list[SupplierPurchaseOrder]:
+        """Las órdenes de compra que se le colocaron."""
+
+    @abc.abstractmethod
+    async def close_supplier_session(self, token: str) -> None:
+        """Cierra la sesión del proveedor (idempotente)."""
 
     @abc.abstractmethod
     async def close_customer_session(self, token: str) -> None:
@@ -462,6 +498,48 @@ class HTTPERPClient(ERPClient):
         extension = "xml" if tipo == "factura_xml" else "pdf"
         return f"{folio or tipo}.{extension}"
 
+    # --- Autoservicio del PROVEEDOR ---------------------------------------- #
+
+    def _sesion_proveedor_client(self, token: str) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=15,
+            headers={**self._auth_headers(), SESION_PROVEEDOR_HEADER: token},
+            transport=self._transport,
+        )
+
+    async def identify_supplier(
+        self, nombre: str, rfc: str, telefono: str
+    ) -> CustomerIdentification:
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/proveedores/identificar",
+                json={"nombre": nombre, "rfc": rfc, "telefono": telefono},
+            )
+            resp.raise_for_status()
+            return CustomerIdentification(**resp.json())
+
+    async def get_supplier_summary(self, token: str) -> SupplierSummary:
+        async with self._sesion_proveedor_client(token) as client:
+            resp = await client.get(f"{self._base_url}/bot/proveedores/resumen")
+            return SupplierSummary(**self._exigir_sesion(resp).json())
+
+    async def list_supplier_invoices(self, token: str) -> list[SupplierInvoice]:
+        async with self._sesion_proveedor_client(token) as client:
+            resp = await client.get(f"{self._base_url}/bot/proveedores/facturas")
+            return [SupplierInvoice(**i) for i in self._exigir_sesion(resp).json()]
+
+    async def list_supplier_orders(self, token: str) -> list[SupplierPurchaseOrder]:
+        async with self._sesion_proveedor_client(token) as client:
+            resp = await client.get(f"{self._base_url}/bot/proveedores/ordenes")
+            return [SupplierPurchaseOrder(**o) for o in self._exigir_sesion(resp).json()]
+
+    async def close_supplier_session(self, token: str) -> None:
+        async with self._sesion_proveedor_client(token) as client:
+            resp = await client.post(f"{self._base_url}/bot/proveedores/cerrar-sesion")
+            if resp.status_code == 401:
+                return
+            resp.raise_for_status()
+
     async def close_customer_session(self, token: str) -> None:
         async with self._sesion_client(token) as client:
             resp = await client.post(f"{self._base_url}/bot/clientes/cerrar-sesion")
@@ -636,6 +714,67 @@ _MOCK_COTIZACIONES = [
     ),
 ]
 
+_MOCK_PROVEEDOR = {
+    "nombre": "Granos del Norte",
+    "razon_social": "GRANOS DEL NORTE, S.A. DE C.V.",
+    "rfc": "GNO900215QT4",
+}
+
+_MOCK_FACTURAS_PROVEEDOR = [
+    SupplierInvoice(
+        id="FP-2026-0031",
+        uuid="9C2A1F44-1111-4A22-9F0E-000000000031",
+        fecha="2026-04-30",
+        fecha_vencimiento="2026-05-30",
+        total=185000.0,
+        saldo=185000.0,
+        estado="pendiente",
+        # Vencida y sin pagar: es la que provoca la llamada.
+        vencida=True,
+    ),
+    SupplierInvoice(
+        id="FP-2026-0048",
+        uuid="9C2A1F44-2222-4A22-9F0E-000000000048",
+        fecha="2026-06-02",
+        fecha_vencimiento="2099-07-02",
+        total=92000.0,
+        saldo=46000.0,
+        estado="parcialmente_pagada",
+        vencida=False,
+    ),
+    SupplierInvoice(
+        id="FP-2026-0050",
+        uuid=None,
+        fecha="2026-06-10",
+        fecha_vencimiento="2026-07-10",
+        total=40000.0,
+        saldo=0.0,
+        estado="pagada",
+        vencida=False,
+    ),
+]
+
+_MOCK_OC_PROVEEDOR = [
+    SupplierPurchaseOrder(
+        id="OC-2026-0001",
+        fecha="2026-04-01",
+        fecha_entrega_estimada="2026-04-20",
+        producto="maiz amarillo",
+        toneladas=100.0,
+        total=510000.0,
+        estado="confirmada",
+    ),
+    SupplierPurchaseOrder(
+        id="OC-2026-0018",
+        fecha="2026-05-20",
+        fecha_entrega_estimada=None,
+        producto="sorgo dulce",
+        toneladas=80.0,
+        total=380000.0,
+        estado="recibida",
+    ),
+]
+
 # FACT-2026-0044 existe en la cuenta del cliente pero no tiene archivo cargado.
 _MOCK_FACTURAS_SIN_ARCHIVO = {"FACT-2026-0044"}
 
@@ -680,6 +819,9 @@ class MockERPClient(ERPClient):
         # token -> {telefono, expira}. Espejo en memoria de lo que en el ERP
         # real es una tabla con el token hasheado.
         self._sesiones: dict[str, dict] = {}
+        # Las del proveedor van en su propio diccionario, como en el ERP van
+        # en su propia tabla: un token de cliente aquí simplemente no está.
+        self._sesiones_proveedor: dict[str, float] = {}
         # Lo que se ha depositado de cotización de fletes, para que las pruebas
         # puedan mirarlo; y los wamid ya vistos, que es como el ERP deduplica.
         self.respuestas_flete: list[dict] = []
@@ -977,6 +1119,62 @@ class MockERPClient(ERPClient):
             )
 
         return None
+
+    # --- Autoservicio del PROVEEDOR ---------------------------------------- #
+
+    async def identify_supplier(
+        self, nombre: str, rfc: str, telefono: str
+    ) -> CustomerIdentification:
+        rfc_norm = rfc.strip().upper().replace("-", "").replace(" ", "")
+        nombre_norm = _normalize(nombre)
+        coincide_nombre = bool(nombre_norm) and (
+            nombre_norm in _normalize(_MOCK_PROVEEDOR["razon_social"])
+            or nombre_norm in _normalize(_MOCK_PROVEEDOR["nombre"])
+        )
+        if rfc_norm != _MOCK_PROVEEDOR["rfc"] or not coincide_nombre:
+            # Mismo "no coincide" falle el nombre o el RFC, igual que el ERP.
+            return CustomerIdentification(
+                encontrado=False, motivo="no_coincide", intentos_restantes=4
+            )
+
+        token = f"tok-prov-{int(time.time() * 1000)}"
+        self._sesiones_proveedor[token] = time.time() + _MOCK_SESION_TTL
+        return CustomerIdentification(
+            encontrado=True,
+            cliente=_MOCK_PROVEEDOR["nombre"],
+            razon_social=_MOCK_PROVEEDOR["razon_social"],
+            rfc=_MOCK_PROVEEDOR["rfc"],
+            token=token,
+            expira_en_segundos=_MOCK_SESION_TTL,
+        )
+
+    def _sesion_proveedor(self, token: str) -> None:
+        expira = self._sesiones_proveedor.get(token)
+        if expira is None or expira < time.time():
+            raise SesionClienteInvalida("La sesión del proveedor expiró o se cerró")
+
+    async def get_supplier_summary(self, token: str) -> SupplierSummary:
+        self._sesion_proveedor(token)
+        abiertas = sum(1 for o in _MOCK_OC_PROVEEDOR if o.estado in ("pendiente", "confirmada"))
+        pendientes = [f for f in _MOCK_FACTURAS_PROVEEDOR if f.saldo > 0 and f.moneda == "MXN"]
+        return SupplierSummary(
+            proveedor=_MOCK_PROVEEDOR["razon_social"],
+            ordenes_abiertas=abiertas,
+            facturas_pendientes=len(pendientes),
+            por_pagar=sum(f.saldo for f in pendientes),
+            vencido=sum(f.saldo for f in pendientes if f.vencida),
+        )
+
+    async def list_supplier_invoices(self, token: str) -> list[SupplierInvoice]:
+        self._sesion_proveedor(token)
+        return list(_MOCK_FACTURAS_PROVEEDOR)
+
+    async def list_supplier_orders(self, token: str) -> list[SupplierPurchaseOrder]:
+        self._sesion_proveedor(token)
+        return list(_MOCK_OC_PROVEEDOR)
+
+    async def close_supplier_session(self, token: str) -> None:
+        self._sesiones_proveedor.pop(token, None)
 
     async def close_customer_session(self, token: str) -> None:
         self._sesiones.pop(token, None)
