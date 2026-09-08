@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     # Si se deja vacío y hay erp_api_key, se envía como "Authorization: Bearer ...".
     erp_api_key_header: str = ""
 
+    # --- CRM: de dónde salen los PRECIOS y a dónde van las cotizaciones ---
+    # El bot NO consulta el ERP para precios. El ERP publica su catálogo al CRM,
+    # el CRM lo espeja, y el bot le pregunta al CRM: un solo sentido, y el bot
+    # no guarda credenciales del ERP.
+    #
+    # crm_base_url debe incluir el prefijo de la API, p. ej.:
+    #   https://crm-api.intergranel.com/api
+    # Vacío = CRM simulado en memoria (desarrollo).
+    #
+    # La llave decide de qué EMPRESA se leen los precios y en cuál entra la
+    # cotización; la empresa nunca viaja en el cuerpo de la petición.
+    crm_base_url: str = ""
+    crm_agent_key: str = ""
+
     # --- Seguridad del webhook entrante de notificaciones del ERP ---
     erp_webhook_secret: str = ""
 
@@ -107,6 +121,10 @@ class Settings(BaseSettings):
     @property
     def use_mock_erp(self) -> bool:
         return not self.erp_base_url
+
+    @property
+    def use_mock_crm(self) -> bool:
+        return not self.crm_base_url
 
     @property
     def compras_allowed_set(self) -> set[str]:

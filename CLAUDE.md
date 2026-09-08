@@ -13,6 +13,8 @@ Un chatbot de WhatsApp con **un solo número** y un **router central** que clasi
 - WhatsApp Cloud API de Meta
 - Redis: historial, deduplicación, bus de eventos
 - ERP: NestJS + Prisma (repo separado), consultado vía REST con header `X-Bot-Api-Key`
+- CRM: NestJS + Drizzle (repo separado). **Los PRECIOS salen de aquí**, con
+  header `X-Agent-Key`. El bot no consulta el ERP para precios.
 - Deploy: Railway
 - Lint: ruff (line-length=100, selects E,F,I,UP,B)
 - Tests: pytest (sin credenciales, usan mock ERP y WhatsApp modo dev)
@@ -31,7 +33,7 @@ app/
   handoff.py           ← Quién está con un asesor y no con el bot
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
-    ventas.py           ← Funcional, precios/cotizaciones vía ERP
+    ventas.py           ← Precios y cotizaciones vía CRM; contratos vía ERP
     compras.py          ← Funcional vía ERP, con lista blanca de teléfonos
     inventario.py       ← Funcional vía ERP, con alertas proactivas
     soporte.py          ← Atención al cliente + autoservicio (identificación por RFC)
@@ -40,13 +42,15 @@ app/
   errores.py           ← El motivo REAL de un fallo HTTP (Meta o ERP), no el status
   fletes.py            ← Cotización de fletes: salida al transportista e
                           interpretación de su respuesta (ERP · BUG-77)
+  crm.py               ← Precios y cotizaciones: la fuente es el CRM, no el ERP
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
 tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
-  test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py
+  test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py,
+  test_crm.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -302,7 +306,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 249 tests pasando
+pytest -q                  # 297 tests pasando
 ```
 
 ## Estado actual y fases
@@ -469,20 +473,80 @@ Se extendió `ERPClient` con `depositar_respuesta_flete` (abstracto + HTTP +
 mock) y se añadieron los modelos `SolicitudFletePendiente`,
 `InterpretacionFlete` y `DepositoRespuestaFlete`.
 
+### Fase 8 ✅ — El precio viene del CRM, no del ERP
+Completada. El agente de Ventas dejó de preguntarle el precio al ERP: se lo
+pregunta al **CRM** (`app/crm.py`). La cadena queda en un solo sentido:
+
+```
+ERP  ──publica su catálogo──►  CRM  ──sirve el precio──►  CHATBOT
+(dueño del precio)          (espejo de solo lectura)    (nunca toca el ERP)
+```
+
+Del lado del ERP, `Inventario → Precio de venta` calcula el precio por tonelada
+desde el costo real del kardex (+ flete, merma, almacenaje, costo financiero y
+margen) y lo publica al CRM **al guardar**. Del lado del CRM,
+`GET /api/ingest/catalog` lo sirve al bot con la misma llave por empresa
+(`X-Agent-Key`) que ya usaba la ingesta: **la llave decide la empresa**, nunca
+el cuerpo de la petición.
+
+**Por qué el precio no lo daba nadie antes.** El bot leía `bot_precios` del ERP,
+una tabla que **nadie escribe desde la aplicación**: se creó en una migración y
+ahí se quedó. Los precios del bot llevaban congelados desde entonces.
+
+Cuatro cosas que el código cuida:
+
+- **Sin CRM no hay precio, y no se cae al ERP.** El atajo el día que el CRM está
+  caído es exactamente el día en que la regla de dirección deja de ser verdad y
+  dos sistemas empiezan a decir precios distintos. Se ofrece un asesor.
+- **La frescura viaja con el precio.** El CRM copió el dato del ERP; si esa copia
+  se quedó vieja (`stale`), el bot NO da ninguna cifra. Decir un precio de la
+  semana pasada con la seguridad de uno de hoy es prometer lo que ya no existe.
+- **Un motivo distinto por causa**, como en `enviar_mi_documento`, y el prompt
+  tiene prohibido mezclarlos:
+
+| `motivo` | Qué pasó |
+|---|---|
+| `no_esta_en_catalogo` | No lo vendemos |
+| `sin_precio_publicado` | **Sí** lo vendemos, nadie le ha puesto precio |
+| `datos_no_confiables` | El espejo del CRM está viejo o falló |
+| `crm_no_disponible` | No se pudo consultar el CRM |
+
+  Los dos primeros no son lo mismo, y confundirlos hace que el bot le diga a un
+  cliente que no manejamos algo que sí manejamos.
+
+- **La cotización se pide a nombre de alguien.** `generar_cotizacion` exige
+  `nombre_cliente`. Es una cortesía para dejarla a nombre de quien la pidió y
+  crear el prospecto en el CRM — **no es un candado**: el nombre no valida nada
+  y no debe tratarse como si lo hiciera. Por eso detrás de él solo hay precio de
+  lista y la cotización recién hecha; los datos de la CUENTA de un cliente
+  (saldo, facturas, contratos) siguen exigiendo RFC en el agente de Soporte.
+
+La cotización queda en el CRM como cotización del agente —tablero, estados,
+aprobación— y **el CRM avisa solo al vendedor** que la regla de asignación
+eligió. Si el CRM responde `modo_cotizacion: "manual"`, el bot no le da el total
+al cliente: un vendedor le hace llegar la formal.
+
+Contrato completo de la cadena en `ERP-INTERGRANEL/docs/PRECIO_DE_VENTA.md` y
+`crm-intergranel-group/docs/precio-al-chatbot.md`.
+
 ## Especificación de agentes
 
-### Ventas (agents/ventas.py) — Funcional vía ERP (mock o HTTP)
+### Ventas (agents/ventas.py) — Precios vía CRM, contratos vía ERP
 
-| Tool | Params requeridos | Qué hace |
-|---|---|---|
-| consultar_precio | producto | Precio/ton, disponibilidad, vigencia (ERP `get_price`) |
-| generar_cotizacion | producto, cantidad_ton | Cotización con total (ERP `create_quote`). Publica en bus |
-| consultar_contrato | folio | Estado de contrato (usa ERP) |
-| listar_contratos_cliente | — | Contratos del remitente (usa ERP) |
-| solicitar_pedido | producto, cantidad_ton | Registra solicitud (ERP `create_request`). Publica en bus |
-| transferir_a_soporte | motivo | Cambia agente activo en bus |
+| Tool | Params requeridos | Fuente | Qué hace |
+|---|---|---|---|
+| listar_productos | — | CRM | Qué se vende, con precio. El modelo no enumera granos de memoria |
+| consultar_precio | producto | CRM | Precio/ton, disponibilidad y de cuándo es el dato |
+| generar_cotizacion | producto, cantidad_ton, **nombre_cliente** | CRM | Registra la cotización, que aparece en el tablero del vendedor |
+| consultar_contrato | folio | ERP | Estado de un contrato |
+| listar_contratos_cliente | — | ERP | Contratos del remitente |
+| solicitar_pedido | producto, cantidad_ton | ERP | Registra solicitud. Publica en bus |
+| transferir_a_soporte | motivo | — | Cambia agente activo en bus |
 
-Precios del mock (`MockERPClient`): maíz amarillo $5,200/ton, maíz blanco $5,450, trigo $7,100, sorgo $4,800, soya $11,500.
+Precios del CRM simulado (`MockCRMClient`): maíz blanco $6,169.56/ton, maíz
+amarillo $5,890.00, trigo cristalino $7,420.50, y sorgo dulce **sin precio** —
+ese último está a propósito, para poder probar la diferencia entre "no lo
+vendemos" y "sí, pero no tiene precio".
 
 ### Soporte (agents/soporte.py) — Atención al cliente + autoservicio
 
@@ -576,6 +640,7 @@ ANTHROPIC_API_KEY, CLAUDE_MODEL (default: claude-opus-4-8)
 WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 ERP_BASE_URL (vacío = mock), ERP_API_KEY, ERP_API_KEY_HEADER (default: X-Bot-Api-Key)
 ERP_WEBHOOK_SECRET
+CRM_BASE_URL (vacío = CRM simulado), CRM_AGENT_KEY (la llave decide la empresa)
 WHATSAPP_AVISO_TEMPLATE (vacío = texto libre; obligatoria en producción)
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
 COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)

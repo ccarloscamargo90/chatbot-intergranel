@@ -417,3 +417,57 @@ class SupplierPurchaseOrder(BaseModel):
     toneladas: float = 0.0
     total: float = 0.0
     estado: str = "pendiente"
+
+
+# --- Catálogo y cotizaciones que sirve el CRM -------------------------------- #
+#
+# El CRM es la ÚNICA fuente de precio del bot. No consulta el ERP: el ERP le
+# publica su catálogo al CRM y el bot le pregunta al CRM. Un solo sentido.
+
+
+class ProductoCRM(BaseModel):
+    """Un producto del catálogo que el CRM espeja del ERP.
+
+    `precio_unitario` en None NO significa que no se venda: significa que se
+    vende y todavía no tiene precio publicado. Los dos casos se contestan
+    distinto, así que se distinguen.
+    """
+
+    sku: str
+    nombre: str
+    unidad: str = "TNE"
+    precio_unitario: float | None = None
+    moneda: str = "MXN"
+    #: "stock" | "en_transito" | "sobre_pedido"
+    disponibilidad: str = "sobre_pedido"
+    existencia: float = 0.0
+
+
+class CatalogoCRM(BaseModel):
+    """El catálogo con su FRESCURA.
+
+    La fecha no es adorno: el CRM copió el precio del ERP, y si esa copia se
+    quedó vieja, decirla con seguridad es cómo el bot le promete a un cliente
+    un precio que ya no existe. `desactualizado` lo dice el CRM, no se deduce.
+    """
+
+    productos: list[ProductoCRM] = []
+    ultima_sync: str | None = None
+    desactualizado: bool = False
+
+
+class CotizacionCRM(BaseModel):
+    """Lo que el CRM devuelve al registrar una cotización del bot."""
+
+    folio: str
+    cotizacion_id: str
+    prospecto_id: str
+    producto: str
+    cantidad_ton: float
+    precio_ton: float
+    total: float
+    moneda: str = "MXN"
+    #: "automatic" = el bot puede enseñar el precio; "manual" = lo revisa un vendedor.
+    modo_cotizacion: str = "automatic"
+    #: Nombre del vendedor al que le tocó, si alguna regla lo asignó.
+    asignado_a: str | None = None
