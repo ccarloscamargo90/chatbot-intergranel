@@ -19,6 +19,7 @@ import anthropic
 
 from ..bus import EventBus, get_event_bus
 from ..config import get_settings
+from ..crm import CRMClient, get_crm_client
 from ..erp import ERPClient, get_erp_client
 from ..history import HistoryStore, get_history_store
 from ..replies import Reply
@@ -38,6 +39,7 @@ class BaseAgent(abc.ABC):
         erp: ERPClient | None = None,
         history_store: HistoryStore | None = None,
         bus: EventBus | None = None,
+        crm: CRMClient | None = None,
     ) -> None:
         settings = get_settings()
         self._api_key = settings.anthropic_api_key or None
@@ -45,6 +47,9 @@ class BaseAgent(abc.ABC):
         self._erp = erp or get_erp_client()
         self._history_store = history_store or get_history_store()
         self._bus = bus or get_event_bus()
+        # Los PRECIOS salen del CRM, no del ERP: el ERP le publica su catálogo
+        # al CRM y el bot le pregunta al CRM. Un solo sentido.
+        self._crm = crm or get_crm_client()
         # El cliente se crea de forma diferida para que la app arranque aunque
         # ANTHROPIC_API_KEY aún no esté configurada (útil en el primer deploy).
         self._client: anthropic.AsyncAnthropic | None = None
