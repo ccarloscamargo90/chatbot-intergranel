@@ -471,3 +471,34 @@ class CotizacionCRM(BaseModel):
     modo_cotizacion: str = "automatic"
     #: Nombre del vendedor al que le tocó, si alguna regla lo asignó.
     asignado_a: str | None = None
+
+
+class NotaCRM(BaseModel):
+    """Lo que el CRM devuelve al guardar el resumen de la plática como nota.
+
+    La nota cuelga del PROSPECTO, en su línea de tiempo: es donde el vendedor
+    mira antes de marcarle a alguien. Sin ella, quien cotizaba por WhatsApp
+    llegaba al CRM como un nombre, un teléfono y un PDF, sin nada que
+    explicara qué quería.
+    """
+
+    prospecto_id: str
+    nota_id: str
+    #: true si ya había una nota para ese folio y se actualizó en vez de duplicar.
+    actualizada: bool = False
+
+
+class CanalizacionCRM(BaseModel):
+    """Lo que el CRM devuelve cuando el bot manda al cliente con un asesor.
+
+    A diferencia de la nota de una cotización, esta llamada CREA el prospecto
+    si no existía: quien pide un asesor sin llegar a cotizar también tiene que
+    aparecer en el tablero, o el vendedor recibe una llamada sin contexto.
+    """
+
+    prospecto_id: str
+    nota_id: str
+    prospecto_creado: bool = False
+    actualizada: bool = False
+    #: Nombre del vendedor al que le tocó, si alguna regla lo asignó.
+    asignado_a: str | None = None

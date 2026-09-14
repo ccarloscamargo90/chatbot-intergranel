@@ -6,9 +6,12 @@ import base64
 import hmac
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 
+from . import tareas
 from .bus import get_event_bus
 from .chatwoot import ChatwootNoDisponible, get_chatwoot_client
 from .config import get_settings
@@ -33,7 +36,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("intergranel")
 
 settings = get_settings()
-app = FastAPI(title="Intergranel · Asistente de WhatsApp")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Al apagar, no dejar a medias el trabajo de segundo plano.
+
+    El resumen que se le deja al vendedor en el CRM se escribe después de
+    contestarle al cliente. Sin esta espera, un redeploy de Railway justo en
+    ese momento se llevaría la nota sin que nada lo dijera.
+    """
+    yield
+    await tareas.esperar_todo(timeout=10)
+
+
+app = FastAPI(title="Intergranel · Asistente de WhatsApp", lifespan=lifespan)
 
 wa = WhatsAppClient()
 router = Router()

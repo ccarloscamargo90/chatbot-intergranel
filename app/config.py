@@ -69,6 +69,20 @@ class Settings(BaseSettings):
     crm_base_url: str = ""
     crm_agent_key: str = ""
 
+    # --- La cotización que se le manda al cliente en PDF ---
+    # Dos condiciones comerciales que el bot NO inventa: si no se configuran,
+    # el PDF no las menciona. Un "+16% de IVA" o un "vigente 5 días" puestos
+    # por omisión serían una condición que nadie autorizó, escrita en un
+    # documento que el cliente va a tratar como una oferta.
+    #
+    # La tasa va como fracción: 0.16 = 16%. En 0 (por omisión) el PDF solo
+    # muestra el total, sin mencionar impuestos, y el CRM no separa IVA — así
+    # el total del tablero es el mismo número que el del PDF del cliente.
+    cotizacion_iva_tasa: float = 0.0
+    # Días que vale el precio desde que se emite. En 0 (por omisión) el PDF no
+    # lleva fecha de vigencia y dice que hay que confirmar con un asesor.
+    cotizacion_vigencia_dias: int = 0
+
     # --- Seguridad del webhook entrante de notificaciones del ERP ---
     erp_webhook_secret: str = ""
 
@@ -112,6 +126,15 @@ class Settings(BaseSettings):
     # al vencer, el bot retoma. Un turno de trabajo por defecto.
     handoff_ttl_seconds: int = 8 * 60 * 60
 
+    # --- Agente de Inventario ---
+    # Lista blanca de teléfonos autorizados a consultar existencias, igual que
+    # en Compras. Existe porque el agente de Inventario da toneladas exactas,
+    # umbral y ubicación del silo: eso es información interna, y sin lista
+    # cualquier número que preguntara "¿cuánto maíz tienen?" caía ahí. Un
+    # número de fuera se queda con Ventas, que solo habla de disponibilidad.
+    # Vacía = sin restricción (modo desarrollo).
+    inventario_phones_allowed: str = ""
+
     # --- Alertas de inventario ---
     # Teléfonos del equipo que reciben las alertas proactivas de inventario,
     # en formato internacional sin '+', separados por comas. Si se deja vacía,
@@ -129,6 +152,10 @@ class Settings(BaseSettings):
     @property
     def compras_allowed_set(self) -> set[str]:
         return {p.strip() for p in self.compras_phones_allowed.split(",") if p.strip()}
+
+    @property
+    def inventario_allowed_set(self) -> set[str]:
+        return {p.strip() for p in self.inventario_phones_allowed.split(",") if p.strip()}
 
     @property
     def inventory_alert_list(self) -> list[str]:
