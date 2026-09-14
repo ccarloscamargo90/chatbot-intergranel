@@ -10,12 +10,35 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app import tareas
 from app.agents.ventas import VentasAgent, folio_cotizacion
 from app.bus import InMemoryEventBus
 from app.crm import CRMNoDisponible, MockCRMClient
 from app.erp import MockERPClient
+from app.history import InMemoryHistoryStore
 
 PHONE = "5215512345678"
+
+
+class WhatsAppDeMentiras:
+    """Apunta lo que se le manda en vez de mandarlo a Meta."""
+
+    def __init__(self) -> None:
+        self.subidos: list[dict] = []
+        self.enviados: list[dict] = []
+
+    async def upload_media(self, contenido, filename, mime_type):
+        self.subidos.append({"bytes": contenido, "nombre": filename, "mime": mime_type})
+        return f"media-{filename}"
+
+    async def send_document(self, to, media_id, filename, caption=""):
+        self.enviados.append({"to": to, "media_id": media_id, "nombre": filename})
+        return {}
+
+
+class WhatsAppQueFalla(WhatsAppDeMentiras):
+    async def upload_media(self, contenido, filename, mime_type):
+        raise RuntimeError("Meta: (#131030) Recipient phone number not in allowed list")
 
 
 @pytest.fixture
@@ -24,6 +47,8 @@ def ventas() -> VentasAgent:
     a._erp = MockERPClient()
     a._crm = MockCRMClient()
     a._bus = InMemoryEventBus()
+    a._history_store = InMemoryHistoryStore()
+    a._wa = WhatsAppDeMentiras()
     return a
 
 
@@ -139,6 +164,173 @@ def test_generar_cotizacion_registra_en_el_crm_y_publica_en_el_bus(ventas):
     assert evento["total"] == 61695.60
 
 
+PEDIDO = {
+    "producto": "maíz blanco",
+    "cantidad_ton": 10,
+    "nombre_cliente": "Molinos del Bajío",
+}
+
+
+def _cotizar(agent, payload=None, phone=PHONE):
+    """Cotiza y espera el trabajo de segundo plano (la nota al vendedor)."""
+
+    async def escenario():
+        crudo = await agent.run_tool("generar_cotizacion", payload or PEDIDO, phone)
+        await tareas.esperar_todo(timeout=5)
+        return json.loads(crudo)
+
+    return asyncio.run(escenario())
+
+
+# --- El PDF que se lleva el cliente ---------------------------------------- #
+
+
+def test_al_cotizar_le_llega_el_pdf_por_whatsapp(ventas):
+    data = _cotizar(ventas)
+
+    assert data["pdf_enviado"] is True
+    assert len(ventas._wa.enviados) == 1
+    # El nombre es lo que le queda guardado en el teléfono: lleva el folio.
+    assert ventas._wa.enviados[0]["nombre"] == f"Cotizacion-{data['folio']}.pdf"
+    assert ventas._wa.enviados[0]["to"] == PHONE
+    subido = ventas._wa.subidos[0]
+    assert subido["mime"] == "application/pdf"
+    assert subido["bytes"].startswith(b"%PDF-")
+
+
+def test_el_pdf_del_cliente_y_el_del_vendedor_son_el_mismo_archivo(ventas):
+    """Si se generara dos veces, el vendedor podría estar viendo una versión
+    y el cliente otra."""
+    data = _cotizar(ventas)
+    en_el_crm = ventas._crm.enviado[0]
+    assert en_el_crm["pdf"] == ventas._wa.subidos[0]["bytes"]
+    assert en_el_crm["pdf_nombre"] == f"Cotizacion-{data['folio']}.pdf"
+
+
+def test_en_modo_manual_el_pdf_va_al_crm_pero_no_al_cliente(ventas):
+    """Es justo lo que ese modo existe para evitar: que el cliente vea un
+    precio que una persona todavía no revisó."""
+    ventas._crm.modo_cotizacion = "manual"
+    data = _cotizar(ventas)
+
+    assert data["pdf_enviado"] is False
+    assert data["motivo_pdf"] == "requiere_revision_de_vendedor"
+    assert ventas._wa.enviados == []
+    # Pero el vendedor sí tiene el archivo para revisarlo y mandarlo.
+    assert ventas._crm.enviado[0]["pdf"].startswith(b"%PDF-")
+
+
+def test_si_meta_rechaza_el_archivo_no_se_da_por_enviado(ventas):
+    ventas._wa = WhatsAppQueFalla()
+    data = _cotizar(ventas)
+
+    assert data["pdf_enviado"] is False
+    assert data["motivo_pdf"] == "fallo_al_enviar"
+    # El motivo REAL de Meta viaja en la respuesta, no "hubo un error".
+    assert "131030" in data["detalle"]
+    # Y la cotización no se perdió por eso.
+    assert len(ventas._crm.cotizaciones) == 1
+    assert "NO digas que ya le llegó" in data["instruccion"]
+
+
+def test_cada_motivo_por_el_que_no_sale_el_pdf_es_distinto(ventas):
+    """Con un solo "no se pudo" para todo, el modelo rellena el hueco y le
+    inventa al cliente una causa que nadie le dio."""
+    ventas._crm.modo_cotizacion = "manual"
+    manual = _cotizar(ventas)
+
+    otro = VentasAgent.__new__(VentasAgent)
+    otro._erp, otro._crm = MockERPClient(), MockCRMClient()
+    otro._bus, otro._history_store = InMemoryEventBus(), InMemoryHistoryStore()
+    otro._wa = WhatsAppQueFalla()
+    fallo = _cotizar(otro)
+
+    assert manual["motivo_pdf"] != fallo["motivo_pdf"]
+
+
+def test_el_total_que_dice_el_bot_es_el_que_dice_el_pdf(ventas, monkeypatch):
+    """Si el bot dijera el subtotal y el archivo el total, estaría diciendo una
+    cifra y el documento otra en la misma conversación."""
+    from app.config import get_settings
+    from app.cotizacion_pdf import DatosCotizacion
+
+    monkeypatch.setattr(get_settings(), "cotizacion_iva_tasa", 0.16)
+    data = _cotizar(ventas)
+
+    del_pdf = DatosCotizacion(
+        folio=data["folio"],
+        cliente="Molinos del Bajío",
+        producto="Maíz blanco",
+        cantidad_ton=10,
+        precio_ton=6169.56,
+        empresa="Intergranel",
+        tasa_iva=0.16,
+    )
+    assert data["total"] == del_pdf.total == 71566.90
+    # Y el CRM recibe la tasa, para que su tablero cuadre con las dos.
+    assert ventas._crm.enviado[0]["tasa_iva"] == 0.16
+
+
+def test_sin_iva_configurado_el_total_es_el_subtotal(ventas):
+    data = _cotizar(ventas)
+    assert data["total"] == 61695.60
+    assert ventas._crm.enviado[0]["tasa_iva"] == 0.0
+
+
+# --- El resumen que lee el vendedor ---------------------------------------- #
+
+
+def test_el_resumen_de_la_platica_queda_como_nota_en_el_crm(ventas):
+    asyncio.run(
+        ventas._history_store.save(
+            f"{PHONE}:ventas",
+            [
+                {"role": "user", "content": "¿A cómo el maíz blanco?"},
+                {"role": "assistant", "content": [{"type": "text", "text": "$6,169.56"}]},
+            ],
+        )
+    )
+    data = _cotizar(ventas)
+
+    assert len(ventas._crm.notas) == 1
+    nota = ventas._crm.notas[0]
+    assert nota["folio"] == data["folio"]
+    # Los hechos no los redacta un modelo: salen de la cotización.
+    assert "Maíz blanco" in nota["resumen"]
+    assert "10.000 t" in nota["resumen"]
+    assert "Ya recibió el PDF" in nota["resumen"]
+
+
+def test_la_nota_dice_cuando_el_pdf_no_se_le_envio(ventas):
+    ventas._crm.modo_cotizacion = "manual"
+    _cotizar(ventas)
+    assert "NO se le envió el PDF" in ventas._crm.notas[0]["resumen"]
+
+
+def test_sin_cotizacion_no_hay_nota(ventas):
+    """Si el CRM no la recibió, no hay de dónde colgar el resumen."""
+    ventas._crm = CRMCaido()
+    data = _cotizar(ventas)
+    assert data["disponible"] is False
+    assert ventas._crm.notas == []
+
+
+def test_la_nota_no_hace_esperar_al_cliente(ventas):
+    """Se lanza en segundo plano: lo que el cliente espera es su PDF."""
+
+    async def escenario():
+        crudo = await ventas.run_tool("generar_cotizacion", PEDIDO, PHONE)
+        # La herramienta ya contestó y la nota todavía no está escrita.
+        sin_escribir = list(ventas._crm.notas)
+        await tareas.esperar_todo(timeout=5)
+        return json.loads(crudo), sin_escribir
+
+    data, sin_escribir = asyncio.run(escenario())
+    assert data["disponible"] is True
+    assert sin_escribir == []
+    assert len(ventas._crm.notas) == 1
+
+
 def test_cotizacion_sin_nombre_no_se_registra(ventas):
     data = _run(
         ventas,
@@ -223,7 +415,40 @@ def test_transferir_a_soporte_cambia_agente_activo(ventas):
     assert asyncio.run(ventas._bus.get_active_agent(PHONE)) == "soporte"
 
 
+# --- Lo que NO se le dice al cliente: cuánto hay --------------------------- #
+
+
+def test_consultar_precio_no_le_dice_al_modelo_cuanto_hay(ventas):
+    """Cuánto grano hay en los silos no sale por WhatsApp. Un prompt se puede
+    rodear; un dato que no está no se puede decir."""
+    data = _run(ventas, "consultar_precio", {"producto": "maíz blanco"})
+    assert data["disponibilidad"] == "stock"
+    assert "existencia_ton" not in data
+    assert 300.0 not in data.values()
+
+
+def test_listar_productos_tampoco_lleva_existencias(ventas):
+    data = _run(ventas, "listar_productos", {})
+    for producto in data["productos"]:
+        assert "existencia_ton" not in producto
+        assert "existencia" not in producto
+
+
 # --- El prompt ------------------------------------------------------------- #
+
+
+def test_el_prompt_prohibe_decir_cuanto_inventario_hay():
+    from app.agents.ventas import SYSTEM_PROMPT
+
+    assert "NUNCA digas cuánto producto hay" in SYSTEM_PROMPT
+    assert "en tránsito" in SYSTEM_PROMPT
+
+
+def test_el_prompt_explica_que_el_pdf_lo_manda_la_herramienta():
+    from app.agents.ventas import SYSTEM_PROMPT
+
+    assert "pdf_enviado: true" in SYSTEM_PROMPT
+    assert "pdf_enviado: false" in SYSTEM_PROMPT
 
 
 def test_el_prompt_prohibe_mezclar_los_motivos():

@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 
+from .. import resumen, tareas
 from ..chatwoot import ChatwootClient, ChatwootNoDisponible, get_chatwoot_client
+from ..crm import CRMNoDisponible
 from ..erp import DocumentoNoRecuperable, DocumentoSinArchivo, SesionClienteInvalida
 from ..errores import AUTO, detalle_http
 from ..handoff import HandoffStore
@@ -487,10 +490,12 @@ class SoporteAgent(BaseAgent):
         cliente que "un asesor continuará en breve" — sin que nadie se enterara.
         Ahora abre la conversación de verdad, y si no puede, lo dice.
         """
+        sesion_para_el_crm = await self._sesiones.leer(telefono)
         if not self._chatwoot.habilitado:
             logger.warning(
                 "Escalamiento sin Chatwoot configurado (%s): %s", telefono, motivo
             )
+            self._contexto_al_crm(telefono, sesion_para_el_crm, motivo, atendido=False)
             return {
                 "escalado": False,
                 "motivo": "canal_no_configurado",
@@ -501,7 +506,7 @@ class SoporteAgent(BaseAgent):
                 ),
             }
 
-        sesion = await self._sesiones.leer(telefono)
+        sesion = sesion_para_el_crm
         try:
             conversacion = await self._chatwoot.abrir_conversacion(
                 telefono,
@@ -516,6 +521,7 @@ class SoporteAgent(BaseAgent):
             # Que el cliente sepa la verdad. Un escalamiento que se pierde en
             # silencio es alguien esperando una respuesta que no va a llegar.
             logger.error("No se pudo escalar %s a Chatwoot: %s", telefono, exc)
+            self._contexto_al_crm(telefono, sesion, motivo, atendido=False)
             return {
                 "escalado": False,
                 "motivo": "chatwoot_no_disponible",
@@ -529,6 +535,7 @@ class SoporteAgent(BaseAgent):
         logger.info(
             "Escalado %s a la conversación %s de Chatwoot", telefono, conversacion.id
         )
+        self._contexto_al_crm(telefono, sesion, motivo, atendido=True)
         return {
             "escalado": True,
             "instruccion": (
@@ -537,6 +544,93 @@ class SoporteAgent(BaseAgent):
                 "corto: lo que escriba después ya lo lee el asesor, no tú."
             ),
         }
+
+    # --- El contexto para el vendedor, del lado del CRM -------------------- #
+
+    def _contexto_al_crm(
+        self,
+        telefono: str,
+        sesion: SesionCliente | None,
+        motivo: str,
+        *,
+        atendido: bool,
+    ) -> None:
+        """Arranca la nota del prospecto en el CRM, sin hacer esperar a nadie.
+
+        La nota privada de Chatwoot es para el asesor que atiende AHORA; esta
+        es para el vendedor que abra la ficha del cliente la semana que viene.
+        Son dos lectores distintos y dos sistemas distintos, así que se
+        escriben las dos.
+
+        Va también cuando NO se pudo pasar con un asesor: es justo el caso en
+        que más falta hace que alguien se entere de que hay un cliente
+        esperando.
+        """
+        tareas.lanzar(
+            self._nota_de_canalizacion(telefono, sesion, motivo, atendido=atendido),
+            nombre=f"resumen-canalizacion:{telefono}",
+        )
+
+    async def _nota_de_canalizacion(
+        self,
+        telefono: str,
+        sesion: SesionCliente | None,
+        motivo: str,
+        *,
+        atendido: bool,
+    ) -> None:
+        hechos = [f"- Pidió hablar con una persona. Motivo: {motivo}."]
+        if sesion is not None:
+            hechos.append(f"- Se identificó como {sesion.cliente}, RFC {sesion.rfc}.")
+        else:
+            hechos.append(
+                "- No se identificó (no dio nombre + RFC), así que no alcanzó a "
+                "ver nada de su cuenta."
+            )
+        hechos.append(
+            "- Ya está en la bandeja del asesor y el bot dejó de contestarle."
+            if atendido
+            else "- NO se le pudo pasar con un asesor: se le pidió intentar más "
+            "tarde. Hay que buscarlo."
+        )
+
+        historial = await self._history_store.load(self._history_key(telefono))
+        texto = await resumen.redactar(hechos=hechos, historial=historial)
+        try:
+            await self._crm.registrar_canalizacion(
+                # La llave de idempotencia lleva el minuto: si el modelo llama
+                # a escalar dos veces seguidas, el CRM actualiza la nota en vez
+                # de dejar dos iguales en la línea de tiempo.
+                id_externo=f"handoff-{telefono}-{datetime.now(UTC):%Y%m%d-%H%M}",
+                # Sin nombre, el nombre LLEVA el teléfono. El CRM liga el
+                # prospecto por teléfono y, si no lo encuentra, por nombre: un
+                # "Cliente de WhatsApp" genérico haría que la nota de alguien
+                # aterrizara en la ficha de otro.
+                nombre_cliente=sesion.cliente if sesion else f"WhatsApp {telefono}",
+                telefono=telefono,
+                resumen=texto,
+                motivo=motivo,
+                folio_cotizacion=await self._folio_cotizado(telefono),
+                rfc=sesion.rfc if sesion else None,
+            )
+        except CRMNoDisponible as exc:
+            # El asesor ya tiene su nota privada en Chatwoot; lo que se pierde
+            # es el contexto en la ficha del CRM. No se le dice nada al
+            # cliente: no es su problema.
+            logger.warning("No se pudo dejar la nota de %s en el CRM: %s", telefono, exc)
+
+    async def _folio_cotizado(self, telefono: str) -> str | None:
+        """El folio de lo último que se le cotizó, si se le cotizó algo.
+
+        Lo publicó el agente de Ventas en el bus. Sirve para que la nota diga
+        de qué cotización venía hablando quien pidió un asesor.
+        """
+        try:
+            datos = await self._bus.read(f"bus:ventas:cotizacion:{telefono}")
+        except Exception:  # noqa: BLE001 - sin folio la nota se escribe igual
+            logger.exception("No se pudo leer la última cotización de %s", telefono)
+            return None
+        return (datos or {}).get("folio")
 
     async def _contexto(
         self, telefono: str, motivo: str, sesion: SesionCliente | None

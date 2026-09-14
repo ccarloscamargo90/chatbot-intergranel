@@ -4,5 +4,7 @@ uvicorn[standard]>=0.32.0
 pydantic>=2.9.0
 pydantic-settings>=2.5.0
 httpx>=0.27.0
+# El PDF de la cotizacion. Python puro: no pide navegador ni libreria del sistema.
+fpdf2>=2.8.0
 redis>=5.0.0
 python-dotenv>=1.0.1

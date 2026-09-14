@@ -15,6 +15,7 @@ Un chatbot de WhatsApp con **un solo número** y un **router central** que clasi
 - ERP: NestJS + Prisma (repo separado), consultado vía REST con header `X-Bot-Api-Key`
 - CRM: NestJS + Drizzle (repo separado). **Los PRECIOS salen de aquí**, con
   header `X-Agent-Key`. El bot no consulta el ERP para precios.
+- PDF de cotizaciones: fpdf2 (Python puro, sin navegador)
 - Deploy: Railway
 - Lint: ruff (line-length=100, selects E,F,I,UP,B)
 - Tests: pytest (sin credenciales, usan mock ERP y WhatsApp modo dev)
@@ -43,6 +44,9 @@ app/
   fletes.py            ← Cotización de fletes: salida al transportista e
                           interpretación de su respuesta (ERP · BUG-77)
   crm.py               ← Precios y cotizaciones: la fuente es el CRM, no el ERP
+  cotizacion_pdf.py    ← El PDF que se lleva el cliente (fpdf2, sin navegador)
+  resumen.py           ← El resumen de lo que se habló, para el vendedor del CRM
+  tareas.py            ← Trabajo en segundo plano: lo que el cliente no espera
   config.py, erp.py, history.py, dedup.py, whatsapp.py, notifications.py, models.py
 tests/
   test_api.py, test_assistant.py, test_bus.py, test_router.py,
@@ -50,8 +54,8 @@ tests/
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
   test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py,
-  test_crm.py
-  conftest.py           ← Fixture `soporte`: el agente con sus mocks inyectados
+  test_crm.py, test_cotizacion_pdf.py, test_resumen.py, test_tareas.py
+  conftest.py           ← Fixture `soporte`: el agente con sus mocks (ERP, CRM, Chatwoot)
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
                           (AUTOSERVICIO_CLIENTES.md)
@@ -306,7 +310,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 297 tests pasando
+pytest -q                  # 359 tests pasando
 ```
 
 ## Estado actual y fases
@@ -529,6 +533,97 @@ al cliente: un vendedor le hace llegar la formal.
 Contrato completo de la cadena en `ERP-INTERGRANEL/docs/PRECIO_DE_VENTA.md` y
 `crm-intergranel-group/docs/precio-al-chatbot.md`.
 
+### Fase 9 ✅ — El PDF al cliente, el contexto al vendedor, y el inventario callado
+Completada. Tres cosas que no tenían que ver entre sí pero que cambian el mismo
+camino: cotizar.
+
+**1. La cotización se va en PDF, y el mismo archivo queda en el CRM.**
+`app/cotizacion_pdf.py` arma la hoja con `fpdf2` (Python puro: ningún navegador
+ni librería del sistema en el contenedor) y `generar_cotizacion` la manda por la
+Media API de Meta —`upload_media` → `send_document`, los mismos bytes, nunca una
+URL— y la empuja al CRM en `pdfBase64` dentro de la MISMA llamada de
+`/ingest/quotes`. Un solo archivo generado una sola vez: si se generara dos
+veces, el vendedor podría estar viendo una versión y el cliente otra.
+
+El nombre lleva el folio (`Cotizacion-COT-20260914-064512-5678.pdf`) porque es
+lo que le queda guardado al cliente en el teléfono y lo que va a mencionar
+cuando llame.
+
+**Dos cifras que el PDF no inventa.** El IVA (`COTIZACION_IVA_TASA`) y la
+vigencia (`COTIZACION_VIGENCIA_DIAS`) se imprimen solo si alguien las configuró.
+Sin configurar no aparecen —y en lugar de la vigencia el pie dice que hay que
+confirmar el precio con un asesor—: un "+16 % de IVA" o un "vigente 5 días"
+puestos por omisión serían una condición comercial que nadie autorizó, escrita
+en un documento que el cliente va a tratar como una oferta. Cuando el IVA sí
+está configurado, la misma tasa viaja al CRM (`taxRate`) para que el total del
+tablero sea el mismo número que el del PDF.
+
+Un motivo distinto por causa, como en `enviar_mi_documento`:
+
+| `motivo_pdf` | Qué pasó |
+|---|---|
+| `requiere_revision_de_vendedor` | El CRM está en modo manual: el PDF se guarda para que una persona lo apruebe, y al cliente NO se le manda |
+| `no_se_pudo_generar` | La cotización sí quedó registrada; el archivo no se armó |
+| `fallo_al_enviar` | El PDF existe y Meta lo rechazó |
+
+**2. El resumen de lo que se habló queda como NOTA del prospecto.** Antes, de
+una cotización por WhatsApp al CRM llegaba un nombre, un teléfono y un PDF: el
+vendedor marcaba sin saber si el cliente preguntó de pasada o tiene una planta
+parada. Ahora `app/resumen.py` redacta la nota y se guarda en dos momentos, con
+los endpoints que el CRM ya tenía:
+
+- al cotizar → `POST /api/ingest/quote-notes` (cuelga del folio; el CRM contesta
+  **409** mientras todavía no ve la cotización, que significa "todavía no" y no
+  "no existe", así que se reintenta en vez de tirar el resumen);
+- al pedir un asesor → `POST /api/ingest/handoffs` (crea el prospecto si no
+  existía, así que también aparece quien pidió una persona sin llegar a
+  cotizar).
+
+Cuatro cosas que el código cuida:
+
+- **El cliente no espera la nota.** Se escribe en segundo plano (`app/tareas.py`):
+  lo que el cliente está esperando es su PDF, no que se acabe de redactar algo
+  que él nunca va a leer. Al apagar, el `lifespan` de FastAPI espera lo que esté
+  en vuelo para que un redeploy no se lleve una nota a medias.
+- **Los HECHOS no los redacta el modelo.** Producto, toneladas, folio y si el
+  PDF salió o no se anteponen al texto, tomados de lo que devolvió la
+  herramienta. El modelo solo aporta el contexto de la plática (para qué es,
+  plaza, urgencia, objeciones), tiene prohibido suponer, y si falla la nota
+  sigue diciendo lo esencial.
+- **Se usa el modelo de los AGENTES, no el clasificador rápido.** Mismo criterio
+  que `fletes.py`: clasificar mal se corrige al siguiente mensaje, pero un
+  resumen mal hecho deja escrita una frase que el vendedor va a leer como si la
+  hubiera dicho el cliente.
+- **Sin nombre, el nombre lleva el teléfono** (`WhatsApp 5215512345678`). El CRM
+  liga el prospecto por teléfono y, si no lo encuentra, **por nombre**: un
+  "Cliente de WhatsApp" genérico haría que la nota de alguien aterrizara en la
+  ficha de otro.
+
+**3. El bot ya no dice cuánto inventario hay.** Dos candados, porque un prompt
+se puede rodear y un dato que no está no se puede decir:
+
+- `consultar_precio` dejó de entregarle `existencia_ton` al modelo. Lo único que
+  se dice de disponibilidad es lo cualitativo del catálogo: disponible, en
+  tránsito o sobre pedido.
+- El agente de **Inventario** —que da toneladas exactas, umbral y ubicación del
+  silo— pasó a tener lista blanca de teléfonos (`INVENTARIO_PHONES_ALLOWED`),
+  igual que Compras. El router mandaba ahí a cualquiera que preguntara "¿cuánto
+  maíz tienen?"; ahora un número de fuera se queda con Ventas.
+  `transferir_a_ventas` no pide autorización: es justo lo que queremos que pase.
+
+Se extendió `CRMClient` con `registrar_nota_cotizacion` y
+`registrar_canalizacion` (abstracto + HTTP + mock), `registrar_cotizacion` ganó
+`pdf`, `pdf_nombre`, `vigencia_hasta` y `tasa_iva`, y se añadieron los modelos
+`NotaCRM` y `CanalizacionCRM`.
+
+**Lo que quedó fuera, a propósito.** En modo manual el CRM llama al agente
+(`POST /crm/cotizacion/aprobar`) cuando el vendedor pulsa «Aprobar y enviar al
+cliente». Ese endpoint no existe en este bot y no se agregó: el `AGENT_BASE_URL`
+del CRM apunta a UN solo agente —hoy el de MegaCostales— así que apuntarlo aquí
+rompería el otro. Mientras el modo siga en `automatic` (el de fábrica) no falta
+nada; si se quiere usar el manual en Intergranel, primero hay que hacer esa
+configuración por empresa del lado del CRM.
+
 ## Especificación de agentes
 
 ### Ventas (agents/ventas.py) — Precios vía CRM, contratos vía ERP
@@ -536,8 +631,8 @@ Contrato completo de la cadena en `ERP-INTERGRANEL/docs/PRECIO_DE_VENTA.md` y
 | Tool | Params requeridos | Fuente | Qué hace |
 |---|---|---|---|
 | listar_productos | — | CRM | Qué se vende, con precio. El modelo no enumera granos de memoria |
-| consultar_precio | producto | CRM | Precio/ton, disponibilidad y de cuándo es el dato |
-| generar_cotizacion | producto, cantidad_ton, **nombre_cliente** | CRM | Registra la cotización, que aparece en el tablero del vendedor |
+| consultar_precio | producto | CRM | Precio/ton, de cuándo es el dato y disponibilidad **cualitativa** (sin toneladas) |
+| generar_cotizacion | producto, cantidad_ton, **nombre_cliente** | CRM | Registra la cotización, le manda el **PDF** por WhatsApp y deja el **resumen** como nota del prospecto |
 | consultar_contrato | folio | ERP | Estado de un contrato |
 | listar_contratos_cliente | — | ERP | Contratos del remitente |
 | solicitar_pedido | producto, cantidad_ton | ERP | Registra solicitud. Publica en bus |
@@ -562,7 +657,7 @@ vendemos" y "sí, pero no tiene precio".
 | listar_mis_cotizaciones | — | ✔ | Cotizaciones con precio, vigencia y si ya venció |
 | enviar_mi_documento | tipo (+folio) | ✔ | Le manda por WhatsApp su factura (PDF/XML), su contrato, su cotización o su estado de cuenta |
 | cerrar_sesion | — | ✔ | Deja de mostrar su información |
-| escalar_a_humano | motivo | — | Abre la conversación en Chatwoot y pasa el teléfono a handoff |
+| escalar_a_humano | motivo | — | Abre la conversación en Chatwoot, pasa el teléfono a handoff y deja el **resumen** como nota del prospecto en el CRM |
 
 Las tools marcadas con ✔ están declaradas en `TOOLS_CON_SESION`: sin sesión
 devuelven `identificado: false` y el agente pide identificarse. Freno local de
@@ -615,6 +710,13 @@ restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
 | resumen_inventario | — | Todos los productos (ERP `list_inventory`) |
 | transferir_a_ventas | motivo | Cambia agente activo |
 
+**Uso interno:** acceso restringido por lista blanca `INVENTARIO_PHONES_ALLOWED`
+(vacía = sin restricción en desarrollo). Lo que contesta son toneladas exactas,
+umbrales y ubicación de los silos —el que sabe cuánto grano hay sabe cuánta
+prisa tenemos por vender— y el router manda aquí a cualquiera que pregunte por
+existencias. `transferir_a_ventas` no requiere autorización: es la salida para
+quien preguntó de buena fe queriendo comprar.
+
 Alertas proactivas: el ERP llama a `POST /webhooks/erp/inventory-alert` cuando
 un producto cae bajo umbral; el webhook publica en el bus y notifica al equipo
 (`INVENTORY_ALERT_PHONES`).
@@ -644,7 +746,10 @@ CRM_BASE_URL (vacío = CRM simulado), CRM_AGENT_KEY (la llave decide la empresa)
 WHATSAPP_AVISO_TEMPLATE (vacío = texto libre; obligatoria en producción)
 REDIS_URL (vacío = memoria), HISTORY_TTL_SECONDS (7d), DEDUP_TTL_SECONDS (1d)
 COMPRAS_PHONES_ALLOWED (vacío = sin restricción; lista separada por comas)
+INVENTARIO_PHONES_ALLOWED (vacío = sin restricción; quién puede consultar existencias)
 INVENTORY_ALERT_PHONES (vacío = solo log+bus; lista separada por comas)
+COTIZACION_IVA_TASA (0 = el PDF no menciona impuestos; 0.16 = separa IVA y va al CRM)
+COTIZACION_VIGENCIA_DIAS (0 = el PDF no lleva vigencia y dice que hay que confirmar)
 CHATWOOT_BASE_URL (vacío = escalamiento deshabilitado; "mock" = simulado)
 CHATWOOT_API_TOKEN, CHATWOOT_ACCOUNT_ID, CHATWOOT_INBOX_ID
 CHATWOOT_WEBHOOK_SECRET (obligatorio en producción: Chatwoot no firma)

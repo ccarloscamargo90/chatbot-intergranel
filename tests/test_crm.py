@@ -6,12 +6,16 @@ del CRM.
 """
 
 import asyncio
+import base64
+import json
+from datetime import date
 
 import httpx
 import pytest
 
 from app.crm import (
     AGENT_KEY_HEADER,
+    CotizacionAunNoRegistrada,
     CRMNoDisponible,
     HTTPCRMClient,
     MockCRMClient,
@@ -218,6 +222,228 @@ def test_cotizacion_rechazada_por_el_crm_no_se_da_por_registrada():
                 precio_ton=6169.56,
             )
         )
+
+
+# --- El PDF viaja con la cotización ---------------------------------------- #
+
+
+def _respuesta_de_cotizacion() -> httpx.Response:
+    return httpx.Response(
+        201,
+        json={
+            "quoteId": "q-1",
+            "prospectId": "p-1",
+            "quotingMode": "automatic",
+            "updated": False,
+            "assignedTo": None,
+        },
+    )
+
+
+def test_el_pdf_viaja_en_base64_sin_el_prefijo_data():
+    """Es el MISMO archivo que recibió el cliente. Va en la misma llamada para
+    que no exista el hueco en el que el cliente tiene un documento que el
+    vendedor no puede ver."""
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return _respuesta_de_cotizacion()
+
+    asyncio.run(
+        _cliente(handler).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="Molinos",
+            telefono="5215512345678",
+            producto="Maíz blanco",
+            cantidad_ton=10,
+            precio_ton=6169.56,
+            pdf=b"%PDF-1.3 fake",
+            pdf_nombre="Cotizacion-COT-1.pdf",
+        )
+    )
+
+    assert not enviado["pdfBase64"].startswith("data:")
+    assert base64.standard_b64decode(enviado["pdfBase64"]) == b"%PDF-1.3 fake"
+    assert enviado["pdfFilename"] == "Cotizacion-COT-1.pdf"
+
+
+def test_sin_pdf_no_se_manda_el_campo_vacio():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return _respuesta_de_cotizacion()
+
+    asyncio.run(
+        _cliente(handler).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="Molinos",
+            telefono="5215512345678",
+            producto="Maíz blanco",
+            cantidad_ton=10,
+            precio_ton=6169.56,
+        )
+    )
+    assert "pdfBase64" not in enviado
+    assert "taxRate" not in enviado
+    assert "validUntil" not in enviado
+
+
+def test_el_iva_y_la_vigencia_solo_viajan_si_estan_configurados():
+    """La vigencia va al FIN DEL DÍA: el CRM la guarda como instante, y
+    "2026-09-19" pelón se vería en México como el día 18."""
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return _respuesta_de_cotizacion()
+
+    asyncio.run(
+        _cliente(handler).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="Molinos",
+            telefono="5215512345678",
+            producto="Maíz blanco",
+            cantidad_ton=10,
+            precio_ton=6169.56,
+            tasa_iva=0.16,
+            vigencia_hasta=date(2026, 9, 19),
+        )
+    )
+    assert enviado["taxRate"] == "0.16"
+    assert enviado["validUntil"] == "2026-09-19T23:59:59Z"
+
+
+# --- El resumen como nota del prospecto ------------------------------------ #
+
+
+def test_la_nota_se_cuelga_del_folio():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/ingest/quote-notes"
+        assert request.headers[AGENT_KEY_HEADER] == "llave-de-intergranel"
+        enviado.update(json.loads(request.content))
+        return httpx.Response(201, json={"prospectId": "p-1", "noteId": "n-1", "updated": False})
+
+    nota = asyncio.run(
+        _cliente(handler).registrar_nota_cotizacion(
+            folio="COT-1", resumen="- Es para su planta en Celaya."
+        )
+    )
+
+    assert enviado == {"folio": "COT-1", "summary": "- Es para su planta en Celaya."}
+    assert nota.prospecto_id == "p-1"
+    assert nota.actualizada is False
+
+
+def test_un_409_significa_todavia_no_y_se_puede_reintentar():
+    """El CRM contesta 409 —y no 404— cuando aún no ve la cotización. Tratarlo
+    como "no existe" tiraría el resumen."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"message": "La cotización COT-1 no está ingestada."})
+
+    with pytest.raises(CotizacionAunNoRegistrada):
+        asyncio.run(_cliente(handler).registrar_nota_cotizacion(folio="COT-1", resumen="x"))
+
+
+def test_un_error_de_verdad_del_crm_no_se_confunde_con_todavia_no():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "boom"})
+
+    with pytest.raises(CRMNoDisponible):
+        asyncio.run(_cliente(handler).registrar_nota_cotizacion(folio="COT-1", resumen="x"))
+
+
+def test_un_409_en_la_cotizacion_no_se_lee_como_todavia_no():
+    """Ese 409 solo significa "todavía no" en la nota. En otra ruta sería un
+    error como cualquier otro, y mandar a reintentar lo que nunca va a
+    funcionar es peor que decir que falló."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"message": "conflicto"})
+
+    with pytest.raises(CRMNoDisponible):
+        asyncio.run(
+            _cliente(handler).registrar_cotizacion(
+                folio="COT-1",
+                nombre_cliente="Molinos",
+                telefono="5215512345678",
+                producto="Maíz blanco",
+                cantidad_ton=10,
+                precio_ton=6169.56,
+            )
+        )
+
+
+# --- La canalización con un asesor ----------------------------------------- #
+
+
+def test_la_canalizacion_manda_el_resumen_y_lo_que_liga_al_prospecto():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/ingest/handoffs"
+        enviado.update(json.loads(request.content))
+        return httpx.Response(
+            201,
+            json={
+                "prospectId": "p-9",
+                "noteId": "n-9",
+                "prospectCreated": True,
+                "updated": False,
+                "assignedTo": {
+                    "userId": "u-1",
+                    "fullName": "Ana Ruiz",
+                    "whatsappPhone": "5215500000000",
+                },
+            },
+        )
+
+    resultado = asyncio.run(
+        _cliente(handler).registrar_canalizacion(
+            id_externo="handoff-5215512345678-20260914-0645",
+            nombre_cliente="Molinos del Bajío S.A. de C.V.",
+            telefono="5215512345678",
+            resumen="- Pidió hablar con una persona.",
+            motivo="reclamo por merma",
+            folio_cotizacion="COT-1",
+            rfc="MBA950101AB1",
+        )
+    )
+
+    assert "company" not in enviado and "empresa" not in enviado
+    assert enviado["externalId"] == "handoff-5215512345678-20260914-0645"
+    assert enviado["prospect"]["taxId"] == "MBA950101AB1"
+    assert enviado["quoteFolio"] == "COT-1"
+    assert enviado["contactMethod"] == "whatsapp"
+    assert resultado.prospecto_creado is True
+    assert resultado.asignado_a == "Ana Ruiz"
+
+
+def test_sin_rfc_el_campo_no_viaja():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return httpx.Response(
+            201,
+            json={"prospectId": "p-9", "noteId": "n-9", "prospectCreated": True,
+                  "updated": False, "assignedTo": None},
+        )
+
+    asyncio.run(
+        _cliente(handler).registrar_canalizacion(
+            id_externo="h-1",
+            nombre_cliente="WhatsApp 5215512345678",
+            telefono="5215512345678",
+            resumen="- Pidió un asesor.",
+        )
+    )
+    assert "taxId" not in enviado["prospect"]
+    assert "quoteFolio" not in enviado
 
 
 # --- El CRM simulado ------------------------------------------------------- #

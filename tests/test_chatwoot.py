@@ -13,13 +13,14 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app import main
+from app import main, tareas
 from app.bus import InMemoryEventBus
 from app.chatwoot import (
     ChatwootNoDisponible,
     MockChatwootClient,
     NullChatwootClient,
 )
+from app.crm import CRMNoDisponible, MockCRMClient
 from app.dedup import InMemoryDedupStore
 from app.handoff import HandoffStore
 
@@ -342,3 +343,112 @@ def test_tras_escalar_la_despedida_va_sin_botones(soporte):
 def test_sin_handoff_los_botones_siguen(soporte):
     reply = asyncio.run(soporte.decorate(PHONE, "Aquí tiene."))
     assert reply.botones
+
+
+# --------------- El contexto para el vendedor, en el CRM ------------------ #
+#
+# La nota privada de Chatwoot es para el asesor que atiende AHORA. Esta otra es
+# para el vendedor que abra la ficha del cliente la semana que viene: dos
+# lectores distintos, dos sistemas distintos, las dos se escriben.
+
+
+def _escalar(soporte, motivo="reclamo por merma", phone=PHONE):
+    """Escala y espera el trabajo de segundo plano (la nota del CRM)."""
+
+    async def escenario():
+        crudo = await soporte.run_tool("escalar_a_humano", {"motivo": motivo}, phone)
+        await tareas.esperar_todo(timeout=5)
+        return json.loads(crudo)
+
+    return asyncio.run(escenario())
+
+
+def test_el_resumen_de_la_platica_queda_en_el_crm(soporte):
+    _escalar(soporte, "quiere renegociar el precio")
+
+    assert len(soporte._crm.canalizaciones) == 1
+    nota = soporte._crm.canalizaciones[0]
+    assert nota["telefono"] == PHONE
+    assert nota["motivo"] == "quiere renegociar el precio"
+    assert "Pidió hablar con una persona" in nota["resumen"]
+    assert "Ya está en la bandeja del asesor" in nota["resumen"]
+
+
+def test_si_se_identifico_la_nota_lleva_su_razon_social_y_rfc(soporte):
+    _run(soporte, "identificar_cliente", {"nombre": "Molinos del Bajío", "rfc": "MBA950101AB1"})
+    _escalar(soporte)
+
+    nota = soporte._crm.canalizaciones[0]
+    assert nota["nombre_cliente"] == "Molinos del Bajío S.A. de C.V."
+    assert nota["rfc"] == "MBA950101AB1"
+    assert "MBA950101AB1" in nota["resumen"]
+
+
+def test_sin_identificarse_el_nombre_lleva_el_telefono(soporte):
+    """El CRM liga el prospecto por teléfono y, si no lo encuentra, por nombre.
+    Un "Cliente de WhatsApp" genérico haría que la nota de alguien aterrizara
+    en la ficha de otro."""
+    _escalar(soporte)
+
+    nota = soporte._crm.canalizaciones[0]
+    assert nota["nombre_cliente"] == f"WhatsApp {PHONE}"
+    assert nota["rfc"] is None
+    assert "No se identificó" in nota["resumen"]
+
+
+def test_la_nota_dice_de_que_cotizacion_venia_hablando(soporte):
+    asyncio.run(
+        soporte._bus.publish(
+            f"bus:ventas:cotizacion:{PHONE}", {"folio": "COT-20260914-064512-5678"}
+        )
+    )
+    _escalar(soporte)
+    assert soporte._crm.canalizaciones[0]["folio_cotizacion"] == "COT-20260914-064512-5678"
+
+
+def test_sin_chatwoot_el_vendedor_igual_se_entera(soporte):
+    """Es justo el caso en que más falta hace: nadie más va a saber que hay un
+    cliente esperando."""
+    soporte._chatwoot = NullChatwootClient()
+    data = _escalar(soporte)
+
+    assert data["escalado"] is False
+    assert len(soporte._crm.canalizaciones) == 1
+    assert "NO se le pudo pasar con un asesor" in soporte._crm.canalizaciones[0]["resumen"]
+
+
+def test_si_chatwoot_falla_la_nota_lo_dice(soporte):
+    async def _falla(*args, **kwargs):
+        raise ChatwootNoDisponible("Chatwoot: 503")
+
+    soporte._chatwoot.abrir_conversacion = _falla
+    data = _escalar(soporte)
+
+    assert data["escalado"] is False
+    assert "Hay que buscarlo" in soporte._crm.canalizaciones[0]["resumen"]
+
+
+def test_si_el_crm_esta_caido_el_escalamiento_no_se_cae(soporte):
+    """El asesor ya tiene su nota privada; lo que se pierde es el contexto en
+    la ficha. No es problema del cliente."""
+
+    class CRMCaido(MockCRMClient):
+        async def registrar_canalizacion(self, **kwargs):
+            raise CRMNoDisponible("CRM: connection refused")
+
+    soporte._crm = CRMCaido()
+    data = _escalar(soporte)
+
+    assert data["escalado"] is True
+    assert soporte._crm.canalizaciones == []
+
+
+def test_dos_escalamientos_seguidos_no_dejan_dos_notas_iguales(soporte):
+    """La llave de idempotencia lleva el minuto: el CRM actualiza la nota en
+    vez de apilar copias en la línea de tiempo."""
+    _escalar(soporte)
+    soporte._chatwoot = MockChatwootClient()
+    _escalar(soporte)
+
+    ids = {n["id_externo"] for n in soporte._crm.canalizaciones}
+    assert len(ids) == 1

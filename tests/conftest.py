@@ -11,6 +11,7 @@ import pytest
 from app.agents.soporte import SoporteAgent
 from app.bus import InMemoryEventBus
 from app.chatwoot import MockChatwootClient
+from app.crm import MockCRMClient
 from app.erp import MockERPClient
 from app.handoff import HandoffStore
 from app.history import InMemoryHistoryStore
@@ -26,4 +27,7 @@ def soporte() -> SoporteAgent:
     agente._sesiones = SesionClienteStore(agente._bus)
     agente._chatwoot = MockChatwootClient()
     agente._handoff = HandoffStore(agente._bus, ttl_segundos=3600)
+    # Al escalar, el resumen de lo que se habló también va al CRM: es lo que
+    # lee el vendedor que abra la ficha del cliente después.
+    agente._crm = MockCRMClient()
     return agente
