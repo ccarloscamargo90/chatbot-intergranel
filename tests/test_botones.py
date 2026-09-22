@@ -11,7 +11,18 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.dedup import InMemoryDedupStore
-from app.menus import ACCIONES, MENU, SALDO, menu_cliente
+from app.menus import (
+    ACCIONES,
+    BOTONES_ANONIMO,
+    BOTONES_COTIZACION,
+    BOTONES_SEGUIMIENTO,
+    BOTONES_VENTAS,
+    COTIZAR,
+    MENU,
+    SALDO,
+    leer_marca,
+    menu_cliente,
+)
 from app.replies import (
     MAX_BOTONES,
     MAX_FILAS_LISTA,
@@ -63,6 +74,38 @@ def test_todo_id_de_menu_tiene_accion():
             assert opcion.id in ACCIONES, opcion.id
 
 
+def test_todo_boton_suelto_tiene_accion():
+    """Lo mismo para los botones sueltos: bienvenida, seguimiento, Ventas y los
+    pasos de la cotización. `MENU` lo contesta el propio router."""
+    sueltos = [*BOTONES_ANONIMO, *BOTONES_SEGUIMIENTO, *BOTONES_VENTAS]
+    for botones in BOTONES_COTIZACION.values():
+        sueltos.extend(botones)
+    for boton in sueltos:
+        assert boton.id == MENU or boton.id in ACCIONES, boton.id
+        assert len(boton.to_payload()["reply"]["title"]) == len(boton.titulo), (
+            f"'{boton.titulo}' se pasa de {MAX_TITULO_BOTON} y Meta lo recortaría"
+        )
+
+
+def test_los_pasos_de_la_cotizacion_caben_y_van_a_ventas():
+    for paso, botones in BOTONES_COTIZACION.items():
+        assert 0 < len(botones) <= MAX_BOTONES, paso
+        for boton in botones:
+            assert ACCIONES[boton.id].agente == "ventas"
+
+
+def test_cotizar_esta_en_los_dos_menus():
+    """Quien ya compra también vuelve a comprar."""
+    for identificado in (True, False):
+        assert COTIZAR in {o.id for o in menu_cliente(identificado).opciones}
+
+
+def test_leer_marca_devuelve_el_ultimo_paso_que_reconoce():
+    limpio, paso = leer_marca("uno [[botones:volumen]]\ndos [[botones:costal]]")
+    assert paso == "costal"
+    assert "[[" not in limpio
+
+
 # --------------------------------- Envío ---------------------------------- #
 def test_reply_de_texto_se_manda_como_texto():
     wa = WhatsAppClient()
@@ -99,6 +142,28 @@ def test_si_el_interactivo_truena_se_manda_el_texto(monkeypatch):
     enviado = asyncio.run(wa.send_reply("521", reply))
     assert enviado["payload"]["type"] == "text"
     assert enviado["payload"]["text"]["body"] == "el saldo es $100"
+
+
+def test_pedir_ubicacion_manda_el_boton_nativo_de_whatsapp():
+    wa = WhatsAppClient()
+    reply = Reply("¿Dónde lo recibe?", pedir_ubicacion=True)
+    enviado = asyncio.run(wa.send_reply("521", reply))["payload"]
+    assert enviado["type"] == "interactive"
+    assert enviado["interactive"]["type"] == "location_request_message"
+    assert enviado["interactive"]["action"] == {"name": "send_location"}
+    assert enviado["interactive"]["body"]["text"] == "¿Dónde lo recibe?"
+
+
+def test_si_la_peticion_de_ubicacion_truena_se_manda_el_texto(monkeypatch):
+    """Sin el botón, el cliente igual puede escribir su código postal."""
+    wa = WhatsAppClient()
+
+    async def _truena(*args, **kwargs):
+        raise RuntimeError("Meta rechazó el interactivo")
+
+    monkeypatch.setattr(wa, "send_location_request", _truena)
+    enviado = asyncio.run(wa.send_reply("521", Reply("¿Su C.P.?", pedir_ubicacion=True)))
+    assert enviado["payload"]["type"] == "text"
 
 
 def test_un_string_pelado_sigue_funcionando():

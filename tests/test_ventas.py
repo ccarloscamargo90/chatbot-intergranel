@@ -11,11 +11,22 @@ from datetime import UTC, datetime
 import pytest
 
 from app import tareas
-from app.agents.ventas import VentasAgent, folio_cotizacion
+from app.agents.ventas import SYSTEM_PROMPT, VentasAgent, folio_cotizacion
+from app.atribucion import ReferenciasWeb
 from app.bus import InMemoryEventBus
+from app.cotizacion_pdf import CONDICION_LAB
 from app.crm import CRMNoDisponible, MockCRMClient
 from app.erp import MockERPClient
 from app.history import InMemoryHistoryStore
+from app.menus import (
+    ASESOR,
+    COT_COSTAL_25,
+    COT_COSTAL_50,
+    COT_ENTREGA_CHICA,
+    COT_UNIDAD_COMPLETA,
+    MENU,
+    PASOS_COTIZACION,
+)
 
 PHONE = "5215512345678"
 
@@ -397,6 +408,18 @@ def test_consultar_contrato_existente(ventas):
     assert data["contrato"]["id"] == "CONT-2026-0001"
 
 
+def test_un_folio_ajeno_no_se_lee_desde_otro_telefono(ventas):
+    """Regla 9: se busca entre los contratos de quien escribe. Desde que la
+    página manda a cualquiera directo a Ventas, adivinar un consecutivo no
+    puede bastar para leer el contrato de otro cliente."""
+    crudo = asyncio.run(
+        ventas.run_tool("consultar_contrato", {"folio": "CONT-2026-0001"}, "5215599999999")
+    )
+    data = json.loads(crudo)
+    assert data["encontrado"] is False
+    assert "contrato" not in data
+
+
 def test_listar_contratos_cliente(ventas):
     data = _run(ventas, "listar_contratos_cliente", {})
     assert data["total"] == 2
@@ -462,3 +485,154 @@ def test_el_prompt_prohibe_mezclar_los_motivos():
     ):
         assert motivo in SYSTEM_PROMPT, f"el prompt no explica el motivo {motivo}"
     assert "PROHIBIDO" in SYSTEM_PROMPT
+
+
+# --- Los botones del guion ------------------------------------------------- #
+
+
+def _decorar(ventas, texto):
+    return asyncio.run(ventas.decorate(PHONE, texto))
+
+
+def test_la_marca_se_vuelve_botones_y_el_cliente_no_la_ve(ventas):
+    reply = _decorar(ventas, "¿Lo quiere en costal de 25 o de 50 kg?\n[[botones:presentacion]]")
+    assert reply.texto == "¿Lo quiere en costal de 25 o de 50 kg?"
+    assert [b.id for b in reply.botones] == [COT_COSTAL_25, COT_COSTAL_50]
+
+
+def test_la_marca_tolera_como_la_escribe_un_modelo(ventas):
+    reply = _decorar(ventas, "¿Cuántas toneladas? [[ Botones: Volumen ]]")
+    assert "[[" not in reply.texto
+    assert COT_UNIDAD_COMPLETA in [b.id for b in reply.botones]
+    assert COT_ENTREGA_CHICA in [b.id for b in reply.botones]
+
+
+def test_pedir_la_ubicacion_manda_el_boton_de_whatsapp(ventas):
+    reply = _decorar(ventas, "¿Dónde lo recibe? O escríbame su C.P.\n[[botones:ubicacion]]")
+    assert reply.pedir_ubicacion is True
+    assert reply.botones == []
+    assert "[[" not in reply.texto
+
+
+def test_sin_marca_van_menu_y_asesor(ventas):
+    """El asesor es la salida del guion para lo que el bot no autoriza."""
+    reply = _decorar(ventas, "Con gusto. ¿Para qué uso lo necesita?")
+    assert [b.id for b in reply.botones] == [MENU, ASESOR]
+    assert reply.pedir_ubicacion is False
+
+
+def test_una_marca_que_no_existe_se_borra_igual(ventas):
+    reply = _decorar(ventas, "¿Algo más?\n[[botones:descuento]]")
+    assert reply.texto == "¿Algo más?"
+    assert [b.id for b in reply.botones] == [MENU, ASESOR]
+
+
+def test_un_mensaje_que_era_solo_la_marca_no_sale_vacio(ventas):
+    reply = _decorar(ventas, "[[botones:costal]]")
+    assert reply.texto.strip()
+    assert "[[" not in reply.texto
+    assert len(reply.botones) == 3
+
+
+def test_el_prompt_y_el_codigo_hablan_de_los_mismos_pasos():
+    """Si el prompt enseña una marca que el código no conoce, el cliente se
+    queda sin botones; si el código conoce una que el prompt no enseña, nunca
+    se usa."""
+    import re
+
+    en_el_prompt = set(re.findall(r"\[\[botones:(\w+)\]\]", SYSTEM_PROMPT))
+    assert en_el_prompt == set(PASOS_COTIZACION)
+
+
+# --- La cotización lleva lo que se calificó -------------------------------- #
+
+CALIFICADO = {
+    **PEDIDO,
+    "presentacion": "costal de 25 kg",
+    "tipo_costal": "sin_marca",
+    "lugar_de_entrega": "Bodega en Celaya, Gto.",
+    "codigo_postal": "38000",
+}
+
+
+def test_la_cotizacion_lleva_presentacion_entrega_y_la_condicion_lab(ventas):
+    _cotizar(ventas, CALIFICADO)
+    enviado = ventas._crm.enviado[0]
+    assert enviado["presentacion"] == "costal de 25 kg, sin marca"
+    assert enviado["codigo_postal"] == "38000"
+    # Lo primero que lee el vendedor es lo mismo que dice el PDF del cliente.
+    assert enviado["notas"].startswith(CONDICION_LAB)
+    assert "Entrega en: Bodega en Celaya, Gto., C.P. 38000." in enviado["notas"]
+
+
+def test_con_marca_dice_la_de_la_empresa(ventas):
+    _cotizar(ventas, {**PEDIDO, "tipo_costal": "con_marca"})
+    assert ventas._crm.enviado[0]["presentacion"] == "costal con marca Intergranel"
+
+
+def test_un_codigo_postal_que_no_lo_es_no_ensucia_la_ficha(ventas):
+    _cotizar(ventas, {**PEDIDO, "codigo_postal": "Celaya"})
+    assert ventas._crm.enviado[0]["codigo_postal"] is None
+
+
+def test_sin_calificar_no_se_inventa_nada(ventas):
+    _cotizar(ventas)
+    enviado = ventas._crm.enviado[0]
+    assert enviado["presentacion"] is None
+    assert enviado["notas"] == CONDICION_LAB
+
+
+def test_la_referencia_de_la_pagina_viaja_con_la_cotizacion(ventas):
+    asyncio.run(ReferenciasWeb(ventas._bus).guardar(PHONE, "IG-SOC-4M2P6X"))
+    _cotizar(ventas)
+    assert ventas._crm.enviado[0]["referencia_contacto"] == "IG-SOC-4M2P6X"
+    assert "IG-SOC-4M2P6X" in ventas._crm.notas[0]["resumen"]
+
+
+def test_sin_referencia_no_se_inventa_una(ventas):
+    _cotizar(ventas)
+    assert ventas._crm.enviado[0]["referencia_contacto"] is None
+
+
+def test_la_nota_dice_si_falta_la_ubicacion_para_el_flete(ventas):
+    _cotizar(ventas)
+    assert "No dio lugar de entrega" in ventas._crm.notas[0]["resumen"]
+
+
+def test_la_nota_dice_donde_entrega_y_que_falta_el_flete(ventas):
+    _cotizar(ventas, CALIFICADO)
+    resumen_ = ventas._crm.notas[0]["resumen"]
+    assert "Entrega en: Bodega en Celaya, Gto., C.P. 38000" in resumen_
+    assert "Falta cotizarle el flete" in resumen_
+    assert "Presentación: costal de 25 kg, sin marca" in resumen_
+
+
+# --- El guion, en el prompt ------------------------------------------------ #
+
+
+def test_el_prompt_no_trae_precios_escritos():
+    """El precio sale del CRM (decisión de negocio). Un precio escrito en el
+    prompt es el bot_precios de siempre: congelado desde el día que se pegó."""
+    for cifra in ("7,000", "7000", "6,950", "6950"):
+        assert cifra not in SYSTEM_PROMPT
+
+
+def test_el_prompt_obliga_a_decir_lab_y_prohibe_cotizar_fletes():
+    assert "Nunca des un precio sin decir que es LAB" in SYSTEM_PROMPT
+    assert "Nunca cotices un flete" in SYSTEM_PROMPT
+    assert "se paga en destino" in SYSTEM_PROMPT
+
+
+def test_el_prompt_no_improvisa_lo_que_el_guion_deja_pendiente():
+    for pendiente in ("crédito", "tiempo de entrega", "vigencia del precio", "muestras"):
+        assert pendiente in SYSTEM_PROMPT
+    assert "NO se improvisan" in SYSTEM_PROMPT
+
+
+def test_el_prompt_no_promete_un_asesor_que_nadie_aviso():
+    assert "NO le prometas que alguien lo va a contactar" in SYSTEM_PROMPT
+
+
+def test_el_lote_interno_no_se_menciona():
+    assert "PB 25" in SYSTEM_PROMPT
+    assert "nunca la menciones" in SYSTEM_PROMPT

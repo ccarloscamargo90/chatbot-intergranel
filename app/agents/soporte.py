@@ -28,6 +28,7 @@ import logging
 from datetime import UTC, datetime
 
 from .. import resumen, tareas
+from ..atribucion import ReferenciasWeb
 from ..chatwoot import ChatwootClient, ChatwootNoDisponible, get_chatwoot_client
 from ..crm import CRMNoDisponible
 from ..erp import DocumentoNoRecuperable, DocumentoSinArchivo, SesionClienteInvalida
@@ -108,6 +109,11 @@ lo contactará: nadie se enteró. Dile con honestidad que no se pudo y sigue la 
 instrucción que venga en la respuesta.
 - El cliente puede mandarte imágenes (una remisión, un comprobante) o PDFs. \
 Léelos y úsalos; si traen un folio, úsalo para consultar.
+- **Si quiere COMPRAR** —pregunta precios, quiere cotizar, pregunta por \
+presentaciones, envíos o por un grano que no ha pedido— NO le pidas RFC ni lo \
+mandes a identificarse: para cotizar no hace falta. Dile en una línea que toque \
+el botón "🧮 Cotizar" y ahí le preparan su cotización. Nunca des precios tú: \
+no tienes con qué consultarlos.
 - **Si quien escribe es un PROVEEDOR** —dice que nos vende, pregunta cuándo le \
 pagamos, menciona una factura que él nos emitió o una orden de compra nuestra— \
 NO intentes identificarlo aquí: no está en el padrón de clientes y lo único que \
@@ -415,7 +421,8 @@ class SoporteAgent(BaseAgent):
             "minutos_de_sesion": sesion.minutos_restantes,
             "instruccion": (
                 "Salúdalo por el nombre de su empresa y dile qué puede consultar: "
-                "pedidos, contratos, facturas y saldo."
+                "pedidos, contratos, facturas y saldo, y que también puede "
+                "pedir una cotización."
             ),
         }
 
@@ -587,6 +594,11 @@ class SoporteAgent(BaseAgent):
                 "- No se identificó (no dio nombre + RFC), así que no alcanzó a "
                 "ver nada de su cuenta."
             )
+        # De qué campaña vino, si escribió desde la página: va en la nota para
+        # quien la lea y como `contactRef` para que el CRM atribuya.
+        referencia = await ReferenciasWeb(self._bus).leer(telefono)
+        if referencia:
+            hechos.append(f"- Llegó por el WhatsApp de la página web (ref {referencia}).")
         hechos.append(
             "- Ya está en la bandeja del asesor y el bot dejó de contestarle."
             if atendido
@@ -612,6 +624,7 @@ class SoporteAgent(BaseAgent):
                 motivo=motivo,
                 folio_cotizacion=await self._folio_cotizado(telefono),
                 rfc=sesion.rfc if sesion else None,
+                referencia_contacto=referencia,
             )
         except CRMNoDisponible as exc:
             # El asesor ya tiene su nota privada en Chatwoot; lo que se pierde

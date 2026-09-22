@@ -116,3 +116,16 @@ def test_al_modelo_se_le_prohibe_inventar_y_hablar_de_inventario():
     instrucciones = cliente.peticiones[0]["system"]
     assert "ESCRIBE SOLO lo que aparece en la transcripción" in instrucciones
     assert "NO menciones existencias ni inventario" in instrucciones
+
+
+def test_las_marcas_de_botones_no_llegan_a_la_nota():
+    """`[[botones:costal]]` es una instrucción para armar el mensaje, no algo
+    que se le dijo al cliente: el vendedor no tiene por qué leerla."""
+    texto = transcripcion(
+        [
+            {"role": "user", "content": "Quiero 40 toneladas"},
+            {"role": "assistant", "content": "¿Con marca o sin marca?\n[[botones:costal]]"},
+        ]
+    )
+    assert "[[" not in texto
+    assert "Asistente: ¿Con marca o sin marca?" in texto

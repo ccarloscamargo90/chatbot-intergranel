@@ -15,10 +15,17 @@ o un "+16% IVA" puestos por omisión serían una condición comercial que nadie
 autorizó, escrita en un documento que el cliente va a tratar como una oferta.
 Y cuando el IVA sí está configurado, la misma tasa viaja al CRM, para que el
 total del tablero sea el mismo número que el del PDF.
+
+**Una condición que sí va siempre: el precio es LAB y el flete va aparte.** No
+es una suposición de este módulo: es la regla número uno del guion de ventas
+("nunca dar un precio sin decir que es LAB"), confirmada para todos los granos.
+Un PDF que no lo diga es un PDF que el cliente lee como precio puesto en su
+bodega, y el trato se cae cuando llega la cuenta del flete.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -62,6 +69,17 @@ REEMPLAZOS = {
 }
 
 
+_LIGA = re.compile(r"https?://\S+")
+
+#: Lo que el PDF y el CRM dicen de la base del precio. Una sola redacción para
+#: los dos: el vendedor tiene que leer en su tablero lo mismo que el cliente.
+CONDICION_LAB = (
+    "Precio LAB (libre a bordo): el grano cargado en la unidad, en nuestra "
+    "sucursal. El flete no está incluido: se cotiza aparte, según el lugar de "
+    "entrega, y se paga en destino."
+)
+
+
 @dataclass(frozen=True)
 class DatosCotizacion:
     """Lo que se imprime. Vive aquí y no en `models.py` a propósito: no cruza
@@ -82,6 +100,11 @@ class DatosCotizacion:
     vigencia_hasta: date | None = None
     #: Fracción: 0.16 = 16 %. En 0 el PDF no menciona impuestos.
     tasa_iva: float = 0.0
+    #: Lo que el cliente eligió al calificar ("costal de 25 kg, sin marca").
+    #: Solo se imprime lo que se dijo: un renglón vacío no se inventa.
+    presentacion: str | None = None
+    sucursal: str | None = None
+    entrega: str | None = None
 
     @property
     def subtotal(self) -> float:
@@ -188,7 +211,13 @@ def construir(datos: DatosCotizacion) -> bytes:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(32, 5.5, sanear(etiqueta))
         pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 5.5, sanear(valor), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        # `multi_cell` y no `cell`: un lugar de entrega largo se corta en
+        # renglones en vez de salirse de la hoja. Alineado a la izquierda: el
+        # justificado estira los espacios de una dirección hasta volverla
+        # ilegible.
+        pdf.multi_cell(
+            0, 5.5, sanear(valor), align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT
+        )
     pdf.ln(4)
 
     # --- La partida --- #
@@ -239,6 +268,16 @@ def _datos_del_cliente(datos: DatosCotizacion, emitida: date) -> list[tuple[str,
         renglones.insert(1, ("Teléfono:", datos.telefono))
     if datos.vigencia_hasta:
         renglones.append(("Vigencia:", fecha_larga(datos.vigencia_hasta)))
+    if datos.presentacion:
+        renglones.append(("Presentación:", datos.presentacion))
+    if datos.sucursal:
+        renglones.append(("Carga en:", datos.sucursal))
+    if datos.entrega:
+        # La liga del mapa sirve en el CRM, donde el vendedor la toca; en un
+        # papel no se puede tocar y solo estorba.
+        entrega = " ".join(_LIGA.sub("", datos.entrega).split()).strip(" ,")
+        if entrega:
+            renglones.append(("Entrega en:", entrega))
     return renglones
 
 
@@ -262,6 +301,7 @@ def _notas_al_pie(datos: DatosCotizacion) -> list[str]:
     notas = [
         f"Precios en {datos.moneda} por tonelada. Sujetos a confirmación y a "
         "disponibilidad de producto al momento de cerrar el pedido.",
+        CONDICION_LAB,
     ]
     fecha = fecha_del_dato(datos.precio_actualizado_el)
     if fecha:

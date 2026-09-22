@@ -8,19 +8,33 @@ import asyncio
 
 import pytest
 
+from app.atribucion import ReferenciasWeb
 from app.bus import InMemoryEventBus
-from app.menus import CERRAR_SESION, MENU, PRECIOS, SALDO
-from app.router import Router
+from app.menus import (
+    ASESOR,
+    CERRAR_SESION,
+    COT_COSTAL_25,
+    COTIZAR,
+    IDENTIFICARME,
+    MENU,
+    PRECIOS,
+    SALDO,
+)
+from app.router import CLASSIFIER_SYSTEM, Router
 
 
 class FakeAgent:
     def __init__(self, name: str) -> None:
         self.name = name
         self.calls: list[tuple] = []
+        self.anotados: list[tuple] = []
 
     async def handle(self, phone, content, store_text=None):
         self.calls.append((phone, content, store_text))
         return f"[{self.name}] {content}"
+
+    async def anotar_turno(self, phone, usuario, respuesta):
+        self.anotados.append((phone, usuario, respuesta))
 
 
 def _make_router() -> tuple[Router, dict, InMemoryEventBus]:
@@ -173,3 +187,116 @@ def test_comandos_todos_los_agentes(agente):
     router, agents, _ = _make_router()
     asyncio.run(router.route("521", f"/{agente} algo"))
     assert len(agents[agente].calls) == 1
+
+
+# ------------------------ Mensaje de la página web ------------------------ #
+DE_LA_PAGINA = (
+    "Hola Intergranel, quisiera información sobre sus granos y servicios. "
+    "(ref: IG-SOC-4M2P6X)"
+)
+
+
+def _sin_clasificar(monkeypatch, router):
+    async def _boom(text):
+        raise AssertionError("el mensaje de la página no se clasifica: ya dice a qué viene")
+
+    monkeypatch.setattr(router, "_classify", _boom)
+
+
+def test_quien_llega_de_la_pagina_recibe_la_bienvenida_de_ventas(monkeypatch):
+    """Antes caía en Soporte y se le ofrecían contratos y facturas a alguien
+    que todavía no ha comprado nada."""
+    router, agents, bus = _make_router()
+    _sin_clasificar(monkeypatch, router)
+
+    reply = asyncio.run(router.route("521", DE_LA_PAGINA))
+
+    assert [b.id for b in reply.botones] == [COTIZAR, IDENTIFICARME, ASESOR]
+    assert "cotización" in reply.texto
+    # Nadie contestó por modelo: es una bienvenida fija, inmediata.
+    assert all(not a.calls for a in agents.values())
+    # Y lo que escriba después le llega a Ventas, no a Soporte.
+    assert asyncio.run(bus.get_active_agent("521")) == "ventas"
+
+
+def test_la_bienvenida_no_empieza_por_el_precio():
+    """Regla del guion: primero saludar y calificar; el precio, después."""
+    router, _, _ = _make_router()
+    reply = asyncio.run(router.route("521", DE_LA_PAGINA))
+    assert "$" not in reply.texto
+    assert PRECIOS not in [b.id for b in reply.botones]
+
+
+def test_ventas_sabe_que_ya_saludo():
+    """El siguiente mensaje ("Quiero cotizar.") le llega a Ventas; sin la
+    bienvenida en su historial, saludaría otra vez desde cero."""
+    router, agents, _ = _make_router()
+    reply = asyncio.run(router.route("521", DE_LA_PAGINA))
+    ((telefono, usuario, respuesta),) = agents["ventas"].anotados
+    assert telefono == "521"
+    assert "(ref:" not in usuario
+    assert respuesta == reply.texto
+
+
+def test_la_referencia_se_guarda_para_el_crm():
+    router, _, bus = _make_router()
+    asyncio.run(router.route("521", DE_LA_PAGINA))
+    assert asyncio.run(ReferenciasWeb(bus).leer("521")) == "IG-SOC-4M2P6X"
+
+
+def test_si_escribio_algo_propio_se_le_contesta_eso(monkeypatch):
+    router, agents, _ = _make_router()
+    _sin_clasificar(monkeypatch, router)
+
+    asyncio.run(router.route("521", "Necesito 40 toneladas en Celaya (ref: IG-ADS-K7Q9RW)"))
+
+    ((_, contenido, guardado),) = agents["ventas"].calls
+    assert contenido == "Necesito 40 toneladas en Celaya"
+    assert guardado == "Necesito 40 toneladas en Celaya"
+
+
+def test_la_pagina_gana_aunque_viniera_hablando_con_soporte(monkeypatch):
+    """Tocar el botón de la página es empezar de nuevo, y a comprar."""
+    router, agents, bus = _make_router()
+    asyncio.run(bus.set_active_agent("521", "soporte"))
+
+    reply = asyncio.run(router.route("521", DE_LA_PAGINA))
+
+    assert COTIZAR in [b.id for b in reply.botones]
+    assert not agents["soporte"].calls
+    assert asyncio.run(bus.get_active_agent("521")) == "ventas"
+
+
+def test_despues_de_la_bienvenida_lo_escrito_va_a_ventas(monkeypatch):
+    router, agents, _ = _make_router()
+    asyncio.run(router.route("521", DE_LA_PAGINA))
+    _sin_clasificar(monkeypatch, router)
+    asyncio.run(router.route("521", "¿a cómo el maíz?"))
+    assert len(agents["ventas"].calls) == 1
+
+
+def test_un_folio_de_contrato_no_se_toma_por_la_pagina(monkeypatch):
+    router, agents, _ = _make_router()
+    asyncio.run(router.route("521", "/soporte ¿cómo va el CONT-2026-0001?"))
+    assert len(agents["soporte"].calls) == 1
+    assert not agents["ventas"].anotados
+
+
+def test_el_boton_cotizar_va_a_ventas(monkeypatch):
+    router, agents, _ = _make_router()
+    _sin_clasificar(monkeypatch, router)
+    asyncio.run(router.route("521", COTIZAR))
+    assert agents["ventas"].calls[0][1] == "Quiero cotizar."
+
+
+def test_un_paso_de_la_cotizacion_va_a_ventas_con_su_frase(monkeypatch):
+    router, agents, _ = _make_router()
+    _sin_clasificar(monkeypatch, router)
+    asyncio.run(router.route("521", COT_COSTAL_25))
+    assert agents["ventas"].calls[0][1] == "Lo quiero en costal de 25 kg."
+
+
+def test_el_clasificador_manda_la_informacion_de_granos_a_ventas():
+    """Quien pide información de los granos está pensando en comprar."""
+    renglon_ventas = next(r for r in CLASSIFIER_SYSTEM.split("\n") if r.startswith("- ventas"))
+    assert "información sobre los granos" in renglon_ventas

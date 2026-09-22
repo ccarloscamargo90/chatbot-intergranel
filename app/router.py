@@ -2,8 +2,12 @@
 
 Orden de decisión:
 
+0. Mensaje de la página web: trae `(ref: IG-…)` (ver `atribucion.py`). Se
+   guarda la referencia para el CRM y se recibe a la persona como prospecto:
+   bienvenida de ventas con botones, y Ventas queda como agente activo.
 1. Comando explícito: un `/comando` (`/ventas`, `/compras`, `/inventario`,
-   `/soporte`, `/menu`) o el id de un botón del menú (`cli_*`, ver `menus.py`).
+   `/soporte`, `/menu`) o el id de un botón del menú (`cli_*`, `cot_*`, ver
+   `menus.py`).
 2. Sesión activa en el bus (continuidad con el agente del turno anterior).
 3. Clasificación de intención con Claude Haiku (una palabra), con fallback a
    Soporte.
@@ -30,9 +34,22 @@ from .agents.inventario import InventarioAgent
 from .agents.proveedores import ProveedoresAgent
 from .agents.soporte import SoporteAgent
 from .agents.ventas import VentasAgent
+from .atribucion import (
+    ReferenciasWeb,
+    es_texto_de_la_pagina,
+    extraer_referencia,
+    sin_referencia,
+)
 from .bus import EventBus, get_event_bus
 from .config import get_settings
-from .menus import MENU, accion, menu_cliente, texto_menu
+from .menus import (
+    BOTONES_ANONIMO,
+    MENU,
+    accion,
+    menu_cliente,
+    texto_bienvenida,
+    texto_menu,
+)
 from .replies import Reply
 from .sesiones import SesionClienteStore
 
@@ -50,13 +67,18 @@ COMMANDS = {
     "/proveedor": "proveedores",
 }
 
+# "Información de sus granos" es de VENTAS: quien la pide está pensando en
+# comprar. Cuando caía en "dudas generales" iba a Soporte, que le ofrecía
+# contratos y facturas a alguien que todavía no ha comprado nada.
 CLASSIFIER_SYSTEM = (
     "Clasifica el mensaje del usuario de un chatbot de una comercializadora de "
     "granos en UNA de estas categorías y responde SOLO con la palabra exacta:\n"
-    "- ventas: precios, cotizaciones, comprar producto, hacer un pedido.\n"
+    "- ventas: precios, cotizaciones, comprar producto, hacer un pedido, "
+    "información sobre los granos, presentaciones, envíos o servicios.\n"
     "- compras: órdenes de compra a proveedores, abastecimiento interno.\n"
     "- inventario: existencias, stock, disponibilidad en silos.\n"
-    "- soporte: estado de órdenes existentes, entregas, reclamos, dudas generales.\n"
+    "- soporte: estado de pedidos o contratos existentes, entregas de algo ya "
+    "comprado, facturas, saldo, reclamos, dudas generales.\n"
     "Responde únicamente con: ventas, compras, inventario o soporte."
 )
 
@@ -87,7 +109,9 @@ class Router:
         self._bus = bus or get_event_bus()
         self._agents = agents if agents is not None else _build_default_agents(self._bus)
         self._sesiones = SesionClienteStore(self._bus)
+        self._referencias = ReferenciasWeb(self._bus)
         settings = get_settings()
+        self._empresa = settings.company_name
         self._api_key = settings.anthropic_api_key or None
         self._client: anthropic.AsyncAnthropic | None = None
 
@@ -161,6 +185,44 @@ class Router:
             lista=menu_cliente(identificado),
         )
 
+    async def _desde_la_pagina(self, phone: str, texto: str) -> Reply | str | None:
+        """Recibe a quien escribe con la referencia de la página web.
+
+        Devuelve la bienvenida si la persona solo tocó el botón, el mensaje
+        limpio (sin la referencia) si además escribió algo propio —para que
+        Ventas lo conteste—, o None si el mensaje no viene de la página.
+
+        Es un comando más, igual de exacto que un botón: tocar "WhatsApp" en la
+        página de ventas es una intención, y preguntarle a un modelo qué quiso
+        decir es cómo terminaba en Soporte ofreciendo facturas.
+        """
+        referencia = extraer_referencia(texto)
+        if referencia is None or "ventas" not in self._agents:
+            return None
+
+        # La referencia se guarda ANTES de contestar: si algo falla después,
+        # la atribución ya quedó, y es lo que el CRM necesita para saber de
+        # qué campaña vino este prospecto.
+        await self._referencias.guardar(phone, referencia)
+        await self._bus.set_active_agent(phone, "ventas")
+        logger.info("Mensaje de la página web desde %s (%s)", phone, referencia)
+
+        propio = sin_referencia(texto)
+        if not es_texto_de_la_pagina(propio):
+            return propio
+
+        bienvenida = Reply(texto=texto_bienvenida(self._empresa), botones=BOTONES_ANONIMO)
+        # Ventas tiene que saber que ya saludó y que ofreció cotizar: el
+        # siguiente mensaje ("Quiero cotizar.") le llega a él, y sin esto
+        # saludaría otra vez como si la conversación empezara ahí.
+        try:
+            await self._agents["ventas"].anotar_turno(
+                phone, propio or "Hola", bienvenida.texto
+            )
+        except Exception:  # noqa: BLE001 - sin historial se saluda igual
+            logger.exception("No se pudo anotar la bienvenida en el historial de %s", phone)
+        return bienvenida
+
     async def route(
         self,
         phone: str,
@@ -169,6 +231,14 @@ class Router:
     ) -> Reply:
         """Decide el agente y delega el mensaje. Devuelve la respuesta."""
         text = content if isinstance(content, str) else (store_text or "")
+
+        if isinstance(content, str):
+            desde_la_pagina = await self._desde_la_pagina(phone, content)
+            if isinstance(desde_la_pagina, Reply):
+                return desde_la_pagina
+            if desde_la_pagina is not None:
+                agent = self._agents["ventas"]
+                return Reply.coerce(await agent.handle(phone, desde_la_pagina, desde_la_pagina))
 
         command = self._parse_command(text) if isinstance(content, str) else None
         if command is not None:

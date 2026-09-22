@@ -174,6 +174,30 @@ def _texto_interactivo(message: dict) -> str | None:
     return boton_id or (respuesta.get("title") or "").strip() or None
 
 
+def _texto_de_ubicacion(message: dict) -> str | None:
+    """La ubicación que compartió el cliente, como texto para el agente.
+
+    Llega cuando toca "Enviar ubicación" (lo pide Ventas antes de cotizar el
+    flete) o cuando la manda por su cuenta. Se vuelve texto con las
+    coordenadas y una liga de mapa: el agente la pasa tal cual a la cotización
+    y el vendedor la abre en un toque. Sin coordenadas no hay ubicación.
+    """
+    ubicacion = message.get("location") or {}
+    latitud, longitud = ubicacion.get("latitude"), ubicacion.get("longitude")
+    if latitud is None or longitud is None:
+        return None
+    lugar = ", ".join(
+        p for p in ((ubicacion.get("name") or "").strip(), (ubicacion.get("address") or "").strip())
+        if p
+    )
+    coordenadas = f"{latitud},{longitud}"
+    detalle = f"{lugar} ({coordenadas})" if lugar else coordenadas
+    return (
+        f"📍 Esta es mi ubicación para la entrega: {detalle} "
+        f"https://maps.google.com/?q={coordenadas}"
+    )
+
+
 def _texto_para_el_asesor(message: dict) -> str:
     """Lo que dijo el cliente, en texto plano para la bandeja del asesor.
 
@@ -187,6 +211,8 @@ def _texto_para_el_asesor(message: dict) -> str:
     if mtype == "interactive":
         seleccion = _texto_interactivo(message) or ""
         return f"[tocó una opción del menú: {seleccion}]" if seleccion else "[tocó una opción]"
+    if mtype == "location":
+        return _texto_de_ubicacion(message) or "[el cliente compartió una ubicación]"
     if mtype in ("image", "document", "audio", "video", "sticker"):
         pie = (message.get(mtype, {}) or {}).get("caption") or ""
         etiqueta = f"[el cliente envió un archivo: {mtype}]"
@@ -293,6 +319,19 @@ async def _process_message(message: dict) -> None:
                 )
                 return
             reply = await router.route(phone, seleccion)
+            await wa.send_reply(phone, reply)
+            return
+
+        if mtype == "location":
+            texto = _texto_de_ubicacion(message)
+            if texto is None:
+                await wa.send_text(
+                    phone,
+                    "No alcancé a ver la ubicación. ¿Me la puede mandar otra vez o "
+                    "escribirme su código postal?",
+                )
+                return
+            reply = await router.route(phone, texto)
             await wa.send_reply(phone, reply)
             return
 

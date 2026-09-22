@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.erp import SesionClienteInvalida
-from app.menus import ASESOR, MENU
+from app.menus import ASESOR, COTIZAR, MENU
 from app.sesiones import MAX_INTENTOS_LOCALES
 
 PHONE = "5215512345678"
@@ -188,7 +188,9 @@ def test_recien_identificado_se_manda_el_menu_completo(soporte):
     assert {"cli_saldo", "cli_pedidos", "cli_facturas"} <= ids
 
 
-def test_despues_van_los_dos_botones_de_seguimiento(soporte):
+def test_despues_van_los_botones_de_seguimiento(soporte):
+    """Menú, cotizar y asesor: quien consulta su cuenta también puede comprar,
+    y el botón le ahorra adivinar cómo se pide."""
     reply = asyncio.run(soporte.decorate(PHONE, "Aquí tiene."))
     assert reply.lista is None
-    assert [b.id for b in reply.botones] == [MENU, ASESOR]
+    assert [b.id for b in reply.botones] == [MENU, COTIZAR, ASESOR]

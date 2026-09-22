@@ -10,7 +10,9 @@ from datetime import date
 import pytest
 
 from app.cotizacion_pdf import (
+    CONDICION_LAB,
     DatosCotizacion,
+    _datos_del_cliente,
     _notas_al_pie,
     _renglones_del_total,
     construir,
@@ -142,3 +144,51 @@ def test_el_dinero_lleva_separador_de_miles(valor, esperado):
 
 def test_la_fecha_va_en_español_sin_depender_del_locale():
     assert fecha_larga(date(2026, 9, 14)) == "14 de septiembre de 2026"
+
+
+# --- LAB y lo que se calificó ---------------------------------------------- #
+
+
+def test_el_pdf_siempre_dice_que_el_precio_es_lab_y_el_flete_va_aparte():
+    """Regla uno del guion: sin esto el cliente lee precio puesto en su bodega
+    y el trato se cae cuando llega la cuenta del flete."""
+    notas = _notas_al_pie(_datos())
+    assert CONDICION_LAB in notas
+    assert "se paga en destino" in CONDICION_LAB
+
+
+def test_lo_que_se_califico_se_imprime():
+    renglones = dict(
+        _datos_del_cliente(
+            _datos(
+                presentacion="costal de 25 kg, sin marca",
+                sucursal="Irapuato",
+                entrega="Bodega en Celaya, C.P. 38000",
+            ),
+            date(2026, 9, 14),
+        )
+    )
+    assert renglones["Presentación:"] == "costal de 25 kg, sin marca"
+    assert renglones["Carga en:"] == "Irapuato"
+    assert renglones["Entrega en:"] == "Bodega en Celaya, C.P. 38000"
+
+
+def test_lo_que_no_se_dijo_no_aparece():
+    etiquetas = {e for e, _ in _datos_del_cliente(_datos(), date(2026, 9, 14))}
+    assert not etiquetas & {"Presentación:", "Carga en:", "Entrega en:"}
+
+
+def test_un_lugar_de_entrega_largo_no_tumba_el_archivo():
+    contenido = construir(_datos(entrega="Camino a la bodega " * 20))
+    assert contenido.startswith(b"%PDF-")
+
+
+def test_la_liga_del_mapa_no_se_imprime():
+    """En el CRM el vendedor la toca; en papel no se puede y solo estorba."""
+    renglones = dict(
+        _datos_del_cliente(
+            _datos(entrega="Bodega Norte (20.5,-100.8) https://maps.google.com/?q=20.5,-100.8"),
+            date(2026, 9, 14),
+        )
+    )
+    assert renglones["Entrega en:"] == "Bodega Norte (20.5,-100.8)"
