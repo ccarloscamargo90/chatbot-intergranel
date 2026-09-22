@@ -114,3 +114,43 @@ def test_process_audio_no_soportado(monkeypatch):
     assert handled == []  # no se invoca al router
     assert len(sent) == 1  # se envía aviso
     assert "texto, imágenes y documentos PDF" in sent[0][1]
+
+
+# --- La ubicación que comparte el cliente (el pin del guion) --------------- #
+
+
+def test_la_ubicacion_llega_al_router_como_texto_con_coordenadas(monkeypatch):
+    handled, sent = _patch_pipeline(monkeypatch)
+    message = {
+        "id": "wamid.LOC",
+        "from": "5215512345678",
+        "type": "location",
+        "location": {
+            "latitude": 20.5236,
+            "longitude": -100.8157,
+            "name": "Bodega Norte",
+            "address": "Av. Tecnológico 100, Celaya",
+        },
+    }
+    asyncio.run(main._process_message(message))
+    ((_, texto, _),) = handled
+    assert "20.5236,-100.8157" in texto
+    assert "Bodega Norte, Av. Tecnológico 100, Celaya" in texto
+    # Una liga que el vendedor abre en un toque.
+    assert "https://maps.google.com/?q=20.5236,-100.8157" in texto
+
+
+def test_una_ubicacion_sin_coordenadas_se_pide_otra_vez(monkeypatch):
+    handled, sent = _patch_pipeline(monkeypatch)
+    message = {"id": "wamid.LOC2", "from": "5215512345678", "type": "location", "location": {}}
+    asyncio.run(main._process_message(message))
+    assert handled == []
+    assert "código postal" in sent[0][1]
+
+
+def test_el_asesor_ve_la_ubicacion_y_no_un_tipo_no_soportado():
+    texto = main._texto_para_el_asesor(
+        {"type": "location", "location": {"latitude": 20.5, "longitude": -100.8}}
+    )
+    assert "20.5,-100.8" in texto
+    assert "no soportado" not in texto

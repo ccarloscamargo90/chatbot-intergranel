@@ -10,6 +10,11 @@ Meta ofrece dos controles y cada uno tiene su límite duro:
 - `button` — hasta 3 botones de respuesta rápida, título de 20 caracteres.
 - `list`   — hasta 10 filas repartidas en secciones, título de 24 caracteres.
 
+Y un tercero sin opciones: `location_request_message`, un solo botón de
+"Enviar ubicación" que abre la pantalla nativa de WhatsApp para compartirla. Es
+lo que pide el guion de ventas antes de cotizar un flete: el pin, no una
+dirección tecleada a medias.
+
 Esos límites no son negociables: si se pasan, Meta rechaza el mensaje entero y
 el cliente no recibe NADA. Por eso `Reply` los recorta aquí, al construir, y no
 en el momento del envío: más vale un título truncado que un mensaje perdido.
@@ -92,8 +97,9 @@ class MenuLista:
 class Reply:
     """Lo que un agente devuelve: texto y, opcionalmente, botones o un menú.
 
-    `botones` y `lista` son excluyentes; si vienen los dos gana el menú, que es
-    el control con más capacidad.
+    `botones`, `lista` y `pedir_ubicacion` son excluyentes; si vienen varios
+    gana el menú, que es el control con más capacidad, y luego la ubicación,
+    que es lo que se acaba de preguntar.
     """
 
     texto: str
@@ -102,13 +108,15 @@ class Reply:
     # Encabezado y pie del mensaje interactivo (se ignoran en texto pelón).
     encabezado: str = ""
     pie: str = ""
+    # Manda el botón nativo de WhatsApp para compartir la ubicación.
+    pedir_ubicacion: bool = False
 
     def __post_init__(self) -> None:
         self.botones = list(self.botones)[:MAX_BOTONES]
 
     @property
     def es_interactiva(self) -> bool:
-        return bool(self.lista or self.botones)
+        return bool(self.lista or self.botones or self.pedir_ubicacion)
 
     @classmethod
     def coerce(cls, valor: Reply | str) -> Reply:
@@ -124,4 +132,5 @@ class Reply:
             lista=lista if lista is not None else self.lista,
             encabezado=self.encabezado,
             pie=self.pie,
+            pedir_ubicacion=self.pedir_ubicacion,
         )

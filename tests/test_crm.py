@@ -454,3 +454,91 @@ def test_el_mock_trae_un_producto_sin_precio_a_proposito():
     vendemos" y "sí, pero no tiene precio"."""
     catalogo = asyncio.run(MockCRMClient().catalogo())
     assert any(p.precio_unitario is None for p in catalogo.productos)
+
+
+# --- De qué campaña vino (la referencia de la página) ---------------------- #
+
+
+def _capturar(enviado):
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return _respuesta_de_cotizacion()
+
+    return handler
+
+
+def test_la_cotizacion_manda_la_referencia_y_lo_que_se_califico():
+    enviado = {}
+    asyncio.run(
+        _cliente(_capturar(enviado)).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="Tortillería La Esperanza",
+            telefono="5215512345678",
+            producto="Maíz blanco",
+            cantidad_ton=40,
+            precio_ton=6169.56,
+            presentacion="costal de 50 kg, sin marca",
+            codigo_postal="38000",
+            referencia_contacto="IG-SOC-4M2P6X",
+        )
+    )
+    # Con esto el CRM recupera la visita completa y atribuye el prospecto.
+    assert enviado["contactRef"] == "IG-SOC-4M2P6X"
+    assert enviado["prospect"]["postalCode"] == "38000"
+    assert enviado["lines"][0]["description"] == "Maíz blanco — costal de 50 kg, sin marca"
+    assert enviado["prospect"]["productInterest"].endswith("— 40.000 t")
+
+
+def test_sin_referencia_ni_cp_esos_campos_no_viajan():
+    enviado = {}
+    asyncio.run(
+        _cliente(_capturar(enviado)).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="Molinos del Bajío",
+            telefono="5215512345678",
+            producto="Maíz blanco",
+            cantidad_ton=10,
+            precio_ton=6169.56,
+        )
+    )
+    assert "contactRef" not in enviado
+    assert "postalCode" not in enviado["prospect"]
+    assert enviado["prospect"]["productInterest"] == "Maíz blanco — 10.000 t"
+
+
+def test_el_producto_de_interes_cabe_en_lo_que_acepta_el_crm():
+    enviado = {}
+    asyncio.run(
+        _cliente(_capturar(enviado)).registrar_cotizacion(
+            folio="COT-1",
+            nombre_cliente="X",
+            telefono="521",
+            producto="Maíz blanco",
+            cantidad_ton=40,
+            precio_ton=1.0,
+            presentacion="x" * 400,
+        )
+    )
+    interes = enviado["prospect"]["productInterest"]
+    assert len(interes) <= 200
+    # Se recorta la presentación, nunca las toneladas.
+    assert interes.endswith("— 40.000 t")
+
+
+def test_la_canalizacion_tambien_manda_la_referencia():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return httpx.Response(201, json={"prospectId": "p", "noteId": "n"})
+
+    asyncio.run(
+        _cliente(handler).registrar_canalizacion(
+            id_externo="handoff-1",
+            nombre_cliente="WhatsApp 521",
+            telefono="521",
+            resumen="- Pidió hablar con una persona.",
+            referencia_contacto="IG-ADS-K7Q9RW",
+        )
+    )
+    assert enviado["contactRef"] == "IG-ADS-K7Q9RW"

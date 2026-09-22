@@ -27,6 +27,7 @@ import logging
 import anthropic
 
 from .config import get_settings
+from .menus import leer_marca
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +82,13 @@ def transcripcion(historial: list, *, maximo: int = MAX_MENSAJES) -> str:
 
 
 def _texto_del_mensaje(contenido) -> str:
+    """El texto de un turno, sin las marcas de botones del agente de Ventas:
+    son instrucciones para armar el mensaje, no algo que se le dijo a nadie."""
     if isinstance(contenido, str):
-        return contenido.strip()
+        return leer_marca(contenido)[0].strip()
     if isinstance(contenido, list):
         partes = [
-            (b.get("text") or "").strip()
+            leer_marca(b.get("text") or "")[0].strip()
             for b in contenido
             if isinstance(b, dict) and b.get("type") == "text"
         ]

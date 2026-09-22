@@ -406,6 +406,16 @@ def test_la_nota_dice_de_que_cotizacion_venia_hablando(soporte):
     assert soporte._crm.canalizaciones[0]["folio_cotizacion"] == "COT-20260914-064512-5678"
 
 
+def test_quien_llego_de_la_pagina_llega_atribuido_al_crm(soporte):
+    from app.atribucion import ReferenciasWeb
+
+    asyncio.run(ReferenciasWeb(soporte._bus).guardar(PHONE, "IG-SOC-4M2P6X"))
+    _escalar(soporte)
+    nota = soporte._crm.canalizaciones[0]
+    assert nota["referencia_contacto"] == "IG-SOC-4M2P6X"
+    assert "página web (ref IG-SOC-4M2P6X)" in nota["resumen"]
+
+
 def test_sin_chatwoot_el_vendedor_igual_se_entera(soporte):
     """Es justo el caso en que más falta hace: nadie más va a saber que hay un
     cliente esperando."""

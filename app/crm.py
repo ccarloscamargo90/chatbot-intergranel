@@ -78,6 +78,14 @@ def _total_con_iva(cantidad_ton: float, precio_ton: float, tasa_iva: float) -> f
     return round(subtotal + round(subtotal * tasa_iva, 2), 2)
 
 
+def _interes(producto: str, presentacion: str | None, cantidad_ton: float) -> str:
+    """El "producto de interés" del prospecto. El CRM acepta 200 caracteres:
+    si hay que recortar, se recorta la presentación, nunca las toneladas."""
+    toneladas = f" — {cantidad_ton:,.3f} t"
+    que = f"{producto}, {presentacion}" if presentacion else producto
+    return que[: 200 - len(toneladas)] + toneladas
+
+
 def buscar_producto(catalogo: CatalogoCRM, consulta: str) -> ProductoCRM | None:
     """El producto que mejor corresponde a lo que el cliente escribió.
 
@@ -125,12 +133,18 @@ class CRMClient(abc.ABC):
         pdf_nombre: str | None = None,
         vigencia_hasta: date | None = None,
         tasa_iva: float = 0.0,
+        presentacion: str | None = None,
+        codigo_postal: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CotizacionCRM:
         """Deja la cotización en el CRM y devuelve lo que el CRM decidió.
 
         El `pdf` es el MISMO archivo que recibió el cliente por WhatsApp. Va
         aquí y no en una llamada aparte para que no exista el hueco en el que
         el cliente tiene un documento que el vendedor no puede ver.
+
+        `referencia_contacto` es el `(ref: IG-…)` con el que escribió desde la
+        página: con él el CRM recupera de qué campaña vino el prospecto.
         """
 
     @abc.abstractmethod
@@ -155,6 +169,7 @@ class CRMClient(abc.ABC):
         motivo: str | None = None,
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CanalizacionCRM:
         """El bot mandó al cliente con un asesor: deja el resumen como nota.
 
@@ -252,6 +267,9 @@ class HTTPCRMClient(CRMClient):
         pdf_nombre: str | None = None,
         vigencia_hasta: date | None = None,
         tasa_iva: float = 0.0,
+        presentacion: str | None = None,
+        codigo_postal: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CotizacionCRM:
         cuerpo = {
             "folio": folio,
@@ -259,17 +277,23 @@ class HTTPCRMClient(CRMClient):
             "prospect": {
                 "name": nombre_cliente,
                 "phone": telefono,
-                "productInterest": f"{producto} — {cantidad_ton:,.3f} t",
+                "productInterest": _interes(producto, presentacion, cantidad_ton),
+                **({"postalCode": codigo_postal} if codigo_postal else {}),
             },
             "lines": [
                 {
-                    "description": producto,
+                    "description": (
+                        f"{producto} — {presentacion}" if presentacion else producto
+                    )[:300],
                     "quantity": f"{cantidad_ton}",
                     "unitPrice": f"{precio_ton}",
                 }
             ],
             "contactMethod": "whatsapp",
-            **({"notes": notas} if notas else {}),
+            # De qué campaña vino, si escribió desde la página. Sin esto el
+            # prospecto de WhatsApp entra al CRM sin atribución.
+            **({"contactRef": referencia_contacto} if referencia_contacto else {}),
+            **({"notes": notas[:4000]} if notas else {}),
             # El PDF va en base64 y SIN el prefijo `data:`, como pide el CRM.
             **(
                 {
@@ -334,6 +358,7 @@ class HTTPCRMClient(CRMClient):
         motivo: str | None = None,
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CanalizacionCRM:
         cuerpo = {
             "externalId": id_externo,
@@ -347,6 +372,7 @@ class HTTPCRMClient(CRMClient):
                 **({"taxId": rfc} if rfc else {}),
             },
             "contactMethod": "whatsapp",
+            **({"contactRef": referencia_contacto} if referencia_contacto else {}),
             **({"reason": motivo} if motivo else {}),
             **({"quoteFolio": folio_cotizacion} if folio_cotizacion else {}),
         }
@@ -439,6 +465,9 @@ class MockCRMClient(CRMClient):
         pdf_nombre: str | None = None,
         vigencia_hasta: date | None = None,
         tasa_iva: float = 0.0,
+        presentacion: str | None = None,
+        codigo_postal: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CotizacionCRM:
         cotizacion = CotizacionCRM(
             folio=folio,
@@ -463,6 +492,9 @@ class MockCRMClient(CRMClient):
                 "vigencia_hasta": vigencia_hasta,
                 "tasa_iva": tasa_iva,
                 "notas": notas,
+                "presentacion": presentacion,
+                "codigo_postal": codigo_postal,
+                "referencia_contacto": referencia_contacto,
             }
         )
         return cotizacion
@@ -487,6 +519,7 @@ class MockCRMClient(CRMClient):
         motivo: str | None = None,
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
+        referencia_contacto: str | None = None,
     ) -> CanalizacionCRM:
         self.canalizaciones.append(
             {
@@ -497,6 +530,7 @@ class MockCRMClient(CRMClient):
                 "motivo": motivo,
                 "folio_cotizacion": folio_cotizacion,
                 "rfc": rfc,
+                "referencia_contacto": referencia_contacto,
             }
         )
         return CanalizacionCRM(

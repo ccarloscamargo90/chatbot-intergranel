@@ -26,6 +26,8 @@ Un chatbot de WhatsApp con **un solo número** y un **router central** que clasi
 app/
   main.py              ← FastAPI, webhooks, _process_message → router.route()
   router.py            ← Clasifica intención (o lee un botón) → despacha al agente
+  atribucion.py        ← El `(ref: IG-…)` de la página: bienvenida de ventas y
+                          atribución en el CRM
   bus.py               ← Bus de eventos compartido (Redis / InMemory)
   replies.py           ← Reply/Boton/MenuLista: texto + botones, con los topes de Meta
   menus.py             ← Menú del autoservicio del cliente e ids `cli_*` → acción
@@ -54,7 +56,8 @@ tests/
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
   test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py,
-  test_crm.py, test_cotizacion_pdf.py, test_resumen.py, test_tareas.py
+  test_crm.py, test_cotizacion_pdf.py, test_resumen.py, test_tareas.py,
+  test_atribucion.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks (ERP, CRM, Chatwoot)
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -70,9 +73,14 @@ Mensaje de WhatsApp
     ▼
 Router.route(phone, content) -> Reply
     │
+    ├─ 0. Viene de la página web? (trae `(ref: IG-…)`)
+    │     → Guarda la referencia (bus:web:referencia:{phone}, 90 días)
+    │     → Bienvenida de ventas [🧮 Cotizar] [🔑 Ya soy cliente] [👤 Asesor]
+    │       (o, si escribió algo propio, Ventas contesta eso) · activo = ventas
+    │
     ├─ 1. Comando explícito?
     │     · /ventas, /menu, /soporte, /compras, /inventario
-    │     · id de un botón del menú (cli_saldo, cli_pedidos, …)
+    │     · id de un botón del menú (cli_saldo, cli_cotizar, cot_pres_25, …)
     │     → Enrutar directamente al agente que le toca
     │
     ├─ 2. Sesión activa en bus? (bus:session:{phone}:agente, TTL 30min)
@@ -139,7 +147,18 @@ router lo trata como comando explícito, despachando al agente con la frase. El
 agente nunca se entera de que hubo un botón.
 
 Al agregar una opción al menú: id nuevo en `menus.py`, entrada en `ACCIONES`, y
-listo. `test_botones.py` falla si un id del menú se queda sin acción.
+listo. `test_botones.py` falla si un id del menú —o de un botón suelto— se
+queda sin acción. El menú de cliente identificado ya va en 10 filas, el tope de
+Meta: para agregar una, hay que quitar otra.
+
+**Los pasos de la cotización también son botones** (`cot_*`). El agente de
+Ventas decide CUÁNDO preguntar terminando su mensaje con una marca
+(`[[botones:volumen]]`, `presentacion`, `costal` o `ubicacion`) y
+`VentasAgent.decorate` la cambia por los botones —o por el botón nativo de
+"Enviar ubicación" (`Reply.pedir_ubicacion`, `location_request_message`)—. Una
+marca y no una tool porque una tool costaría una vuelta más al modelo en cada
+pregunta. Toda marca se borra del texto, se reconozca o no, y
+`test_ventas.py` falla si el prompt enseña una marca que el código no conoce.
 
 ## Documentos al cliente (tool `enviar_mi_documento`)
 
@@ -310,7 +329,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 359 tests pasando
+pytest -q                  # 435 tests pasando
 ```
 
 ## Estado actual y fases
@@ -624,6 +643,64 @@ rompería el otro. Mientras el modo siga en `automatic` (el de fábrica) no falt
 nada; si se quiere usar el manual en Intergranel, primero hay que hacer esa
 configuración por empresa del lado del CRM.
 
+### Fase 10 ✅ — Quien llega de la página viene a comprar
+Completada. El botón de WhatsApp de intergranel.com manda un texto con una
+referencia: *"Hola Intergranel, quisiera información sobre sus granos y
+servicios. (ref: IG-SOC-4M2P6X)"*. El bot no la reconocía: el clasificador lo
+leía como "duda general", caía en Soporte, y a un prospecto se le pedía el RFC
+y se le ofrecían contratos y facturas. Tres cambios:
+
+**1. La página es un comando.** `atribucion.py` reconoce la referencia (mismo
+formato y alfabeto que la página y que `contact-ref.ts` del CRM; solo prefijo
+`IG`) y el router contesta la bienvenida de ventas sin pasar por ningún modelo:
+saludo, qué manejamos y "¿Le preparo una cotización?", con
+`[🧮 Cotizar] [🔑 Ya soy cliente] [👤 Asesor]`. Ventas queda activo y la
+bienvenida se anota en su historial para que no vuelva a saludar. Si la persona
+escribió algo propio además del texto de la página, Ventas contesta eso.
+
+**2. La referencia llega al CRM.** Se guarda 90 días (lo mismo que la página
+guarda el primer toque) y viaja como `contactRef` en `/ingest/quotes` y
+`/ingest/handoffs`. El CRM ya la esperaba; el bot nunca la mandaba, así que
+todo prospecto de WhatsApp entraba sin campaña.
+
+**3. Ventas vende con el guion** (*Guion de ventas por WhatsApp · maíz blanco*,
+v1.1, 14 sep 2026). Del guion se tomó el MÉTODO y no las cifras:
+
+- Precio **LAB** siempre, y el flete aparte, pagado en destino. Va también en
+  el PDF (`CONDICION_LAB`) y en las notas de la cotización del CRM.
+- Calificar antes de cotizar: grano, toneladas, dónde lo recibe (pin o C.P.) y,
+  en maíz blanco, costal de 25/50 kg y con marca, sin marca o transparente.
+- Reglas del maíz blanco: unidad de 40 t; entregas de hasta 6 t solo en
+  Querétaro, Irapuato, Celaya y León; entre 6 y 40 t, asesor.
+- Cuándo pasar con un asesor (descuento, crédito, >40 t, fuera de zona, flete,
+  calidad, facturación) — y sin prometer que alguien lo contacta: eso pasa solo
+  cuando toca 👤 Asesor, que escala por Soporte.
+- Lo que el guion marca como pendiente (pago, crédito, tiempo de entrega,
+  vigencia, muestras, cobertura, IVA) el prompt prohíbe improvisarlo.
+
+**El precio sigue saliendo del CRM**, por decisión de negocio: los $7,000
+(Reyes) y $6,950 (Irapuato) del guion NO están en el prompt, y
+`test_ventas.py` lo verifica. El ERP publica UN precio por producto
+(`docs/PRECIO_DE_VENTA.md`): para que el bot distinga sucursales, en el ERP
+tiene que haber un producto por sucursal. El prompt sabe usar las dos formas.
+
+`generar_cotizacion` ganó `presentacion`, `tipo_costal`, `sucursal`,
+`lugar_de_entrega` y `codigo_postal`: se imprimen en el PDF, van a las notas y a
+la ficha del prospecto en el CRM (el C.P. solo si son 5 dígitos), y a la nota
+del vendedor. El bot ahora **acepta mensajes de ubicación**: el pin se vuelve
+texto con coordenadas y liga de mapa (la liga no se imprime en el PDF).
+
+También cambió: "🧮 Cotizar" está en los dos menús y en los botones de
+seguimiento de Soporte; el clasificador manda "información de sus granos" a
+Ventas; y `consultar_contrato` de Ventas busca **entre los contratos del
+teléfono que escribe**, no por folio global (regla 9) — desde que la página
+manda a cualquiera directo a Ventas, adivinar un consecutivo no puede bastar.
+
+**Lo que quedó fuera, a propósito.** El paso 5 del guion (seguimiento a las 24 y
+72 h) y "le mando el precio los lunes" necesitan que el bot escriba por su
+cuenta, y fuera de la ventana de 24 h eso exige una plantilla aprobada por Meta.
+El prompt tiene prohibido prometerlo mientras no exista.
+
 ## Especificación de agentes
 
 ### Ventas (agents/ventas.py) — Precios vía CRM, contratos vía ERP
@@ -632,8 +709,8 @@ configuración por empresa del lado del CRM.
 |---|---|---|---|
 | listar_productos | — | CRM | Qué se vende, con precio. El modelo no enumera granos de memoria |
 | consultar_precio | producto | CRM | Precio/ton, de cuándo es el dato y disponibilidad **cualitativa** (sin toneladas) |
-| generar_cotizacion | producto, cantidad_ton, **nombre_cliente** | CRM | Registra la cotización, le manda el **PDF** por WhatsApp y deja el **resumen** como nota del prospecto |
-| consultar_contrato | folio | ERP | Estado de un contrato |
+| generar_cotizacion | producto, cantidad_ton, **nombre_cliente** (+ presentacion, tipo_costal, sucursal, lugar_de_entrega, codigo_postal) | CRM | Registra la cotización (con `contactRef` si vino de la página), le manda el **PDF** por WhatsApp y deja el **resumen** como nota del prospecto |
+| consultar_contrato | folio | ERP | Estado de un contrato **de este teléfono** |
 | listar_contratos_cliente | — | ERP | Contratos del remitente |
 | solicitar_pedido | producto, cantidad_ton | ERP | Registra solicitud. Publica en bus |
 | transferir_a_soporte | motivo | — | Cambia agente activo en bus |

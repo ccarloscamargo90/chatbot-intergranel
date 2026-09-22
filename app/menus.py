@@ -13,10 +13,18 @@ recibe "quiero ver mi saldo" y hace lo mismo que si lo hubieran escrito.
 
 Nada de aquí nombra una empresa: los textos son de la relación cliente-proveedor,
 no de una marca. El nombre que se muestre viene de `company_name`.
+
+**Vender también es un botón.** El número no solo atiende a quien ya compra:
+quien escribe desde la página casi siempre viene a comprar. Por eso "🧮 Cotizar"
+está en los dos menús, en los botones de seguimiento y en la bienvenida, y las
+preguntas del guion de ventas que tienen respuesta cerrada (volumen,
+presentación, tipo de costal, ubicación) se contestan con un toque.
 """
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 
 from .replies import Boton, MenuLista, OpcionLista
@@ -35,6 +43,18 @@ ASESOR = "cli_asesor"
 IDENTIFICARME = "cli_identificarme"
 ESTADO_CUENTA = "cli_estado_cuenta"
 CERRAR_SESION = "cli_cerrar_sesion"
+COTIZAR = "cli_cotizar"
+
+# Las respuestas cerradas del guion de ventas llevan su propio prefijo `cot_`:
+# son pasos de UNA cotización, no opciones del menú.
+COT_UNIDAD_COMPLETA = "cot_vol_40"
+COT_ENTREGA_CHICA = "cot_vol_6"
+COT_OTRA_CANTIDAD = "cot_vol_otra"
+COT_COSTAL_25 = "cot_pres_25"
+COT_COSTAL_50 = "cot_pres_50"
+COT_CON_MARCA = "cot_costal_marca"
+COT_SIN_MARCA = "cot_costal_sin_marca"
+COT_TRANSPARENTE = "cot_costal_transparente"
 
 # Los del PROVEEDOR llevan su propio prefijo `prov_`: son otra audiencia, con
 # otra sesión, y mezclar los ids haría que un toque abriera lo que no es.
@@ -69,6 +89,16 @@ ACCIONES: dict[str, Accion] = {
     CERRAR_SESION: Accion("soporte", "Quiero cerrar mi sesión."),
     ASESOR: Accion("soporte", "Quiero hablar con un asesor humano."),
     PRECIOS: Accion("ventas", "¿Cuáles son los precios vigentes?"),
+    COTIZAR: Accion("ventas", "Quiero cotizar."),
+    # --- Pasos de la cotización (guion de ventas) ---
+    COT_UNIDAD_COMPLETA: Accion("ventas", "Necesito una unidad completa, de 40 toneladas."),
+    COT_ENTREGA_CHICA: Accion("ventas", "Necesito una entrega chica, de hasta 6 toneladas."),
+    COT_OTRA_CANTIDAD: Accion("ventas", "Necesito otra cantidad de toneladas."),
+    COT_COSTAL_25: Accion("ventas", "Lo quiero en costal de 25 kg."),
+    COT_COSTAL_50: Accion("ventas", "Lo quiero en costal de 50 kg."),
+    COT_CON_MARCA: Accion("ventas", "Lo quiero en costal con la marca de ustedes."),
+    COT_SIN_MARCA: Accion("ventas", "Lo quiero en costal sin marca."),
+    COT_TRANSPARENTE: Accion("ventas", "Lo quiero en costal transparente."),
     # --- Proveedor ---
     PROV_SOY_PROVEEDOR: Accion(
         "proveedores", "Soy proveedor y quiero consultar mis pagos."
@@ -87,12 +117,15 @@ def accion(boton_id: str) -> Accion | None:
 
 
 # --- Menú principal --------------------------------------------------------- #
+# Son 10 filas: el tope de Meta. Para agregar una, hay que quitar otra.
 _OPCIONES_IDENTIFICADO = [
+    # Primero la compra: quien ya es cliente también vuelve a comprar.
+    OpcionLista(COTIZAR, "🧮 Cotizar", "Le preparo una cotización en PDF"),
     OpcionLista(PEDIDOS, "📦 Mis pedidos", "Estado y fecha de entrega"),
     OpcionLista(CONTRATOS, "📄 Mis contratos", "Contratos y avance de entregas"),
     OpcionLista(SALDO, "💰 Mi saldo", "Lo que debo y lo que está vencido"),
     OpcionLista(FACTURAS, "🧾 Mis facturas", "Folios, montos y estado de cobro"),
-    OpcionLista(COTIZACIONES, "🧮 Mis cotizaciones", "Precios y vigencia"),
+    OpcionLista(COTIZACIONES, "📑 Mis cotizaciones", "Precios y vigencia"),
     OpcionLista(ESTADO_CUENTA, "📄 Estado de cuenta", "Se lo mando en PDF"),
     OpcionLista(PRECIOS, "🌾 Precios del día", "Precios vigentes por tonelada"),
     OpcionLista(ASESOR, "👤 Hablar con asesor", "Le pasamos con una persona"),
@@ -100,7 +133,8 @@ _OPCIONES_IDENTIFICADO = [
 ]
 
 _OPCIONES_ANONIMO = [
-    OpcionLista(IDENTIFICARME, "🔑 Identificarme", "Con su RFC y el nombre de su empresa"),
+    OpcionLista(COTIZAR, "🧮 Cotizar", "Le preparo una cotización en PDF"),
+    OpcionLista(IDENTIFICARME, "🔑 Ya soy cliente", "Con su RFC y el nombre de su empresa"),
     OpcionLista(PRECIOS, "🌾 Precios del día", "Precios vigentes por tonelada"),
     # Quien nos vende también escribe a este número. Sin esta puerta, un
     # proveedor cae en el menú de clientes y se le pide identificarse contra un
@@ -121,16 +155,30 @@ def menu_cliente(identificado: bool) -> MenuLista:
 
 # --- Botones de seguimiento -------------------------------------------------- #
 # Van pegados a una respuesta ya dada: el cliente acaba de leer algo y lo
-# natural es que quiera otra consulta o una persona. Máximo 3 (límite de Meta).
+# natural es que quiera otra consulta, comprar o una persona. Máximo 3 (límite
+# de Meta).
 BOTONES_SEGUIMIENTO = [
+    Boton(MENU, "📋 Menú"),
+    Boton(COTIZAR, "🧮 Cotizar"),
+    Boton(ASESOR, "👤 Asesor"),
+]
+
+# Los de Ventas cuando la respuesta no trae un paso del guion. "Asesor" es la
+# salida que el guion pide para todo lo que el agente no puede autorizar
+# (descuentos, crédito, fletes, volúmenes fuera de regla); "Cotizar" no va
+# porque ya se está cotizando.
+BOTONES_VENTAS = [
     Boton(MENU, "📋 Menú"),
     Boton(ASESOR, "👤 Asesor"),
 ]
 
-# Cuando aún no sabemos quién escribe.
+# Cuando aún no sabemos quién escribe: la bienvenida de quien llega desde la
+# página. Primero la venta; "Ya soy cliente" abre el autoservicio de su cuenta.
+# No hay botón de precios a propósito: el guion de ventas prohíbe empezar por
+# el precio, antes de saber cuánto necesita y dónde.
 BOTONES_ANONIMO = [
-    Boton(IDENTIFICARME, "🔑 Identificarme"),
-    Boton(PRECIOS, "🌾 Precios"),
+    Boton(COTIZAR, "🧮 Cotizar"),
+    Boton(IDENTIFICARME, "🔑 Ya soy cliente"),
     Boton(ASESOR, "👤 Asesor"),
 ]
 
@@ -141,9 +189,83 @@ def texto_menu(identificado: bool, cliente: str = "") -> str:
         saludo = f"Listo, {cliente}. " if cliente else ""
         return f"{saludo}¿Qué desea consultar?"
     return (
-        "Para consultar sus pedidos, contratos, facturas o saldo necesito "
-        "identificarlo primero. ¿Qué desea hacer?"
+        "Puedo prepararle una cotización. Si ya es cliente, también puedo "
+        "mostrarle sus pedidos, contratos, facturas y saldo, identificándolo "
+        "primero. ¿Qué desea hacer?"
     )
+
+
+def texto_bienvenida(empresa: str) -> str:
+    """El primer mensaje a quien escribe desde la página.
+
+    Sigue el paso 1 del guion de ventas —saludar, presentarse, decir qué
+    manejamos y terminar con una pregunta— y NO dice precio ni existencia: el
+    precio viene después de calificar, y cuánto hay no se dice nunca. Dice
+    "manejamos", no "tenemos disponible": la disponibilidad la confirma el
+    catálogo cuando se cotiza, no un saludo escrito de antemano.
+    """
+    return (
+        f"Buen día 👋 Gracias por escribir a {empresa}.\n"
+        "Manejamos maíz blanco nacional del Bajío, con triple cribado, y otros "
+        "granos a granel.\n"
+        "¿Le preparo una cotización?"
+    )
+
+
+# --- Los pasos de la cotización, como botones -------------------------------- #
+# Las preguntas del guion que tienen respuesta cerrada. El agente de Ventas
+# decide CUÁNDO preguntar (lo marca en su respuesta, ver `leer_marca`); aquí
+# se decide CÓMO se ven, con los topes de Meta. Son del maíz blanco: la unidad
+# de 40 t, las entregas de hasta 6 t y los costales vienen del guion de ese
+# grano.
+BOTONES_COTIZACION: dict[str, list[Boton]] = {
+    "volumen": [
+        Boton(COT_UNIDAD_COMPLETA, "🚛 Camión de 40 t"),
+        Boton(COT_ENTREGA_CHICA, "📦 Hasta 6 t"),
+        Boton(COT_OTRA_CANTIDAD, "✏️ Otra cantidad"),
+    ],
+    "presentacion": [
+        Boton(COT_COSTAL_25, "Costal de 25 kg"),
+        Boton(COT_COSTAL_50, "Costal de 50 kg"),
+    ],
+    "costal": [
+        Boton(COT_CON_MARCA, "Con marca"),
+        Boton(COT_SIN_MARCA, "Sin marca"),
+        Boton(COT_TRANSPARENTE, "Transparente"),
+    ],
+}
+
+#: El paso que no es un botón sino la pantalla nativa de WhatsApp para
+#: compartir la ubicación (ver `Reply.pedir_ubicacion`).
+PASO_UBICACION = "ubicacion"
+
+PASOS_COTIZACION = frozenset({*BOTONES_COTIZACION, PASO_UBICACION})
+
+# `[[botones:presentacion]]`. Tolerante con espacios, mayúsculas y acentos
+# porque lo escribe un modelo; y TODA marca se borra del texto, se reconozca o
+# no: una etiqueta a medias en el WhatsApp del cliente se ve peor que un
+# mensaje sin botones.
+_MARCA = re.compile(r"\[\[\s*botones\s*:\s*([^\]]*?)\s*\]\]", re.IGNORECASE)
+
+
+def _paso(crudo: str) -> str:
+    sin_acentos = unicodedata.normalize("NFKD", crudo.lower())
+    return "".join(c for c in sin_acentos if c.isalpha())
+
+
+def leer_marca(texto: str) -> tuple[str, str | None]:
+    """Separa la marca de botones del texto: `(texto_limpio, paso | None)`.
+
+    Por qué una marca en el texto y no una herramienta: una herramienta le
+    cuesta al cliente una vuelta más al modelo en CADA pregunta del guion, y
+    el cliente está esperando con el teléfono en la mano. Si el modelo olvida
+    la marca, lo peor que pasa es que la pregunta llega sin botones.
+    """
+    pasos = [_paso(m) for m in _MARCA.findall(texto)]
+    limpio = _MARCA.sub("", texto)
+    limpio = "\n".join(renglon.rstrip() for renglon in limpio.strip().splitlines())
+    reconocidos = [p for p in pasos if p in PASOS_COTIZACION]
+    return limpio, (reconocidos[-1] if reconocidos else None)
 
 
 # --- Menú del proveedor ------------------------------------------------------ #

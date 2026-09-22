@@ -88,6 +88,19 @@ class BaseAgent(abc.ABC):
             history.pop(0)
         return history
 
+    async def anotar_turno(self, phone: str, usuario: str, respuesta: str) -> None:
+        """Deja en el historial un intercambio que contestó alguien más.
+
+        Lo usa el router cuando responde por su cuenta en nombre del agente
+        (la bienvenida de la página web), para que el agente sepa en el turno
+        siguiente qué se dijo y no empiece la conversación de cero.
+        """
+        key = self._history_key(phone)
+        history = await self._history_store.load(key)
+        history.append({"role": "user", "content": usuario})
+        history.append({"role": "assistant", "content": respuesta})
+        await self._history_store.save(key, self._trim(history))
+
     async def decorate(self, phone: str, texto: str) -> Reply:
         """Gancho para que un agente adjunte botones a su respuesta.
 

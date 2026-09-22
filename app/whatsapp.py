@@ -148,6 +148,28 @@ class WhatsAppClient:
             }
         )
 
+    async def send_location_request(self, to: str, body: str) -> dict[str, Any]:
+        """Pide la ubicación con el botón nativo de WhatsApp ("Enviar ubicación").
+
+        Al tocarlo se abre la pantalla de compartir ubicación, y lo que vuelve
+        es un mensaje de tipo `location` con coordenadas (ver `main.py`). Es lo
+        que pide el guion de ventas antes de cotizar un flete: el pin, no una
+        dirección tecleada a medias. El mensaje no lleva encabezado ni pie.
+        """
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "location_request_message",
+                    "body": {"text": body[:MAX_CUERPO]},
+                    "action": {"name": "send_location"},
+                },
+            }
+        )
+
     async def send_reply(self, to: str, reply: Reply | str) -> dict[str, Any]:
         """Envía una `Reply`: texto, botones o menú, según lo que traiga.
 
@@ -169,6 +191,8 @@ class WhatsAppClient:
                     header=reply.encabezado,
                     footer=reply.pie,
                 )
+            if reply.pedir_ubicacion:
+                return await self.send_location_request(to, reply.texto)
             return await self.send_buttons(
                 to,
                 reply.texto,
