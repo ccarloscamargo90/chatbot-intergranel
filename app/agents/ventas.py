@@ -50,7 +50,7 @@ from ..cotizacion_pdf import (
     vigencia,
 )
 from ..cotizador import CotizadorGuiado
-from ..crm import CotizacionAunNoRegistrada, CRMNoDisponible, buscar_producto
+from ..crm import CotizacionAunNoRegistrada, CRMNoDisponible, buscar_producto, normalizar
 from ..errores import detalle_http
 from ..menus import (
     BOTONES_COTIZACION,
@@ -491,6 +491,18 @@ class Condiciones:
         return "\n".join(renglones)
 
 
+def _listo_productos(herramientas: list[Herramienta] | None) -> bool:
+    """¿En este turno se listó el catálogo con precios confiables?"""
+    for h in herramientas or []:
+        if h.nombre != "listar_productos":
+            continue
+        try:
+            return bool(json.loads(h.resultado).get("disponible"))
+        except (TypeError, ValueError, AttributeError):
+            return False
+    return False
+
+
 def folio_cotizacion(telefono: str, ahora: datetime | None = None) -> str:
     """Folio del bot para una cotización: `COT-20260908-064512-5678`.
 
@@ -567,6 +579,11 @@ class VentasAgent(BaseAgent):
             return Reply(texto=limpio, pedir_ubicacion=True)
         if paso in BOTONES_COTIZACION:
             return Reply(texto=limpio, botones=list(BOTONES_COTIZACION[paso]))
+        if "asesor" in normalizar(limpio):
+            # El prompt le pide al cliente que toque "👤 Asesor" abajo del
+            # mensaje: ese botón tiene que estar ahí, aunque haya una
+            # cotización a medias con otros botones pendientes.
+            return Reply(texto=limpio, botones=list(BOTONES_VENTAS))
         pendiente = await self.cotizador.botones_para(phone)
         if pendiente is not None and pendiente.es_interactiva:
             return Reply(
@@ -575,6 +592,10 @@ class VentasAgent(BaseAgent):
                 lista=pendiente.lista,
                 pedir_ubicacion=pendiente.pedir_ubicacion,
             )
+        if _listo_productos(herramientas):
+            # Acaba de decir qué se maneja: que el grano se elija con un toque
+            # y no tecleándolo (así entra a la cotización guiada).
+            return await self.cotizador.lista_de_granos(limpio)
         return Reply(texto=limpio, botones=list(BOTONES_VENTAS))
 
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:

@@ -627,9 +627,11 @@ class CotizadorGuiado:
                 botones=[BOTON_ASESOR],
             )
         if paso == "cotizada":
+            # Tras la cotización, lo que conteste el modelo lleva "Asesor" y no
+            # "Menú": es la salida del guion para todo lo que el bot no autoriza.
             return Reply(
                 texto="¿Cerramos el pedido?",
-                botones=[BOTON_CERRAR, BOTON_OTRA, BOTON_MENU],
+                botones=[BOTON_CERRAR, BOTON_OTRA, BOTON_ASESOR],
             )
         return await self._resumen(estado)
 

@@ -192,6 +192,12 @@ Cuatro cosas que el código cuida:
   alguien teclea en Soporte no puede terminar como el nombre de una cotización
   que dejó a medias.
 
+Qué botones lleva una respuesta del MODELO de Ventas, en orden: la marca que
+puso; si menciona un asesor, `[📋 Menú] [👤 Asesor]` (el prompt le pide al
+cliente tocar ese botón, así que tiene que estar); los del paso pendiente de la
+cotización guiada; si en el turno listó el catálogo, la lista de granos; y si
+nada aplica, `[📋 Menú] [👤 Asesor]`.
+
 Las reglas del guion (unidad de 40 t, entregas de hasta 6 t solo en Querétaro,
 Irapuato, Celaya y León, lo demás con asesor, presentación y costal) son del
 **maíz blanco** y viven en `reglas_de`. A otro grano solo se le aplica "más de
@@ -413,7 +419,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 520 tests pasando
+pytest -q                  # 523 tests pasando
 ```
 
 ## Estado actual y fases

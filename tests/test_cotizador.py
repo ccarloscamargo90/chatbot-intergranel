@@ -331,6 +331,37 @@ def test_la_respuesta_del_modelo_trae_los_botones_del_paso_pendiente(ventas):
     assert ids(reply) == [COT_UNIDAD_COMPLETA, COT_ENTREGA_CHICA, COT_OTRA_CANTIDAD]
 
 
+def test_si_el_modelo_manda_con_el_asesor_el_boton_esta_aunque_haya_paso_pendiente(ventas):
+    conversar(ventas, COTIZAR, f"{PREFIJO_PRODUCTO}MAIZ-BL")
+    reply = asyncio.run(
+        ventas.decorate(PHONE, "Déjeme validarlo: toque «👤 Asesor» abajo de este mensaje.")
+    )
+    assert ids(reply) == [MENU, ASESOR]
+
+
+def test_despues_de_cotizar_el_modelo_ofrece_cerrar_otra_o_asesor(ventas):
+    conversar(
+        ventas, COTIZAR, f"{PREFIJO_PRODUCTO}TRIGO-CR", "30", "38000", "Molinos", COT_GENERAR
+    )
+    reply = asyncio.run(ventas.decorate(PHONE, "Con gusto. ¿Algo más sobre su cotización?"))
+    assert ids(reply) == [COT_CERRAR, COT_OTRA_COTIZACION, ASESOR]
+
+
+def test_tras_listar_productos_el_grano_se_elige_de_la_lista(ventas):
+    from app.agents.base import Herramienta
+
+    listado = asyncio.run(ventas.run_tool("listar_productos", {}, PHONE))
+    reply = asyncio.run(
+        ventas.decorate(
+            PHONE,
+            "Manejamos maíz blanco, maíz amarillo y trigo. ¿Cuál le interesa?",
+            [Herramienta("listar_productos", {}, listado)],
+        )
+    )
+    assert reply.lista is not None
+    assert f"{PREFIJO_PRODUCTO}MAIZ-BL" in filas(reply)
+
+
 def test_sin_cotizacion_en_curso_el_modelo_sigue_con_menu_y_asesor(ventas):
     reply = asyncio.run(ventas.decorate(PHONE, "Con gusto. ¿Para qué uso lo necesita?"))
     assert ids(reply) == [MENU, ASESOR]
