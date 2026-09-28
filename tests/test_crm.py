@@ -423,6 +423,81 @@ def test_la_canalizacion_manda_el_resumen_y_lo_que_liga_al_prospecto():
     assert resultado.asignado_a == "Ana Ruiz"
 
 
+def test_la_canalizacion_manda_la_liga_a_la_conversacion():
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return httpx.Response(201, json={"prospectId": "p-1", "noteId": "n-1"})
+
+    asyncio.run(
+        _cliente(handler).registrar_canalizacion(
+            id_externo="handoff-1",
+            nombre_cliente="WhatsApp 5215512345678",
+            telefono="5215512345678",
+            resumen="- Pidió hablar con una persona.",
+            url_conversacion="https://chatwoot.intergranel.mx/app/accounts/1/conversations/42",
+        )
+    )
+    assert enviado["conversationUrl"] == (
+        "https://chatwoot.intergranel.mx/app/accounts/1/conversations/42"
+    )
+
+
+def test_un_crm_viejo_que_no_conoce_la_liga_igual_recibe_la_nota():
+    """El CRM rechaza campos que no conoce (forbidNonWhitelisted). Si el bot se
+    publica antes que el CRM, la nota con el resumen no se puede perder por un
+    botón."""
+    cuerpos = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cuerpo = json.loads(request.content)
+        cuerpos.append(cuerpo)
+        if "conversationUrl" in cuerpo:
+            return httpx.Response(
+                400,
+                json={
+                    "message": ["property conversationUrl should not exist"],
+                    "error": "Bad Request",
+                    "statusCode": 400,
+                },
+            )
+        return httpx.Response(201, json={"prospectId": "p-1", "noteId": "n-1"})
+
+    resultado = asyncio.run(
+        _cliente(handler).registrar_canalizacion(
+            id_externo="handoff-1",
+            nombre_cliente="WhatsApp 5215512345678",
+            telefono="5215512345678",
+            resumen="- Pidió hablar con una persona.",
+            url_conversacion="https://chatwoot.intergranel.mx/app/accounts/1/conversations/42",
+        )
+    )
+    assert len(cuerpos) == 2
+    assert "conversationUrl" not in cuerpos[1]
+    assert resultado.nota_id == "n-1"
+
+
+def test_otro_400_no_se_reintenta():
+    llamadas = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        llamadas.append(request)
+        return httpx.Response(400, json={"message": ["summary should not be empty"]})
+
+    with pytest.raises(CRMNoDisponible):
+        asyncio.run(
+            _cliente(handler).registrar_canalizacion(
+                id_externo="handoff-1",
+                nombre_cliente="WhatsApp 5215512345678",
+                telefono="5215512345678",
+                resumen="",
+                url_conversacion="https://chatwoot.intergranel.mx/app/accounts/1/conversations/42",
+            )
+        )
+    assert len(llamadas) == 1
+
+
 def test_sin_rfc_el_campo_no_viaja():
     enviado = {}
 

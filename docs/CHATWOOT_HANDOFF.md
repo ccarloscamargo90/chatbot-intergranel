@@ -145,6 +145,14 @@ abierta, y es lo primero que marca como falla.
 | 8 | El asesor **resuelve** la conversación | Asesor |
 | 9 | El bot retoma y le devuelve los botones al cliente | Bot |
 
+### La liga en el CRM
+
+Además de la nota privada para el asesor, el bot deja el resumen como nota del
+prospecto en el CRM (`POST /ingest/handoffs`), con `conversationUrl`: la liga
+a la conversación en el panel de Chatwoot. En la ficha aparece como
+**«Seguimiento en Chatwoot»**, junto a un botón de **WhatsApp** (`wa.me` al
+teléfono del cliente), para que el vendedor retome sin buscarlo.
+
 ### La nota privada (paso 3)
 
 Es lo que evita que el cliente cuente todo otra vez. Lleva el motivo del

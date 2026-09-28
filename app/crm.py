@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import abc
 import base64
+import logging
 import unicodedata
 from datetime import UTC, date, datetime
 
@@ -32,6 +33,8 @@ import httpx
 from .config import get_settings
 from .errores import detalle_http, detalle_respuesta
 from .models import CanalizacionCRM, CatalogoCRM, CotizacionCRM, NotaCRM, ProductoCRM
+
+logger = logging.getLogger(__name__)
 
 #: Header por el que viaja la llave del agente hacia el CRM.
 AGENT_KEY_HEADER = "X-Agent-Key"
@@ -170,11 +173,13 @@ class CRMClient(abc.ABC):
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
         referencia_contacto: str | None = None,
+        url_conversacion: str | None = None,
     ) -> CanalizacionCRM:
         """El bot mandó al cliente con un asesor: deja el resumen como nota.
 
         Crea el prospecto si no existía, así que sirve también para quien
-        pidió un asesor sin llegar a cotizar.
+        pidió un asesor sin llegar a cotizar. `url_conversacion` es la liga a
+        la conversación en Chatwoot: la ficha del CRM la muestra como botón.
         """
 
 
@@ -359,6 +364,7 @@ class HTTPCRMClient(CRMClient):
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
         referencia_contacto: str | None = None,
+        url_conversacion: str | None = None,
     ) -> CanalizacionCRM:
         cuerpo = {
             "externalId": id_externo,
@@ -375,8 +381,19 @@ class HTTPCRMClient(CRMClient):
             **({"contactRef": referencia_contacto} if referencia_contacto else {}),
             **({"reason": motivo} if motivo else {}),
             **({"quoteFolio": folio_cotizacion} if folio_cotizacion else {}),
+            **({"conversationUrl": url_conversacion} if url_conversacion else {}),
         }
-        datos = await self._post("/ingest/handoffs", cuerpo)
+        try:
+            datos = await self._post("/ingest/handoffs", cuerpo)
+        except CRMNoDisponible as exc:
+            # Un CRM anterior a la liga de seguimiento rechaza el campo (400
+            # "property conversationUrl should not exist"). La nota con el
+            # resumen vale más que el botón: se reenvía sin la liga.
+            if "conversationUrl" not in cuerpo or "conversationUrl" not in str(exc):
+                raise
+            logger.warning("El CRM no aceptó la liga de la conversación (%s); va sin ella", exc)
+            cuerpo.pop("conversationUrl")
+            datos = await self._post("/ingest/handoffs", cuerpo)
         asignado = datos.get("assignedTo") or {}
         return CanalizacionCRM(
             prospecto_id=datos.get("prospectId", ""),
@@ -520,6 +537,7 @@ class MockCRMClient(CRMClient):
         folio_cotizacion: str | None = None,
         rfc: str | None = None,
         referencia_contacto: str | None = None,
+        url_conversacion: str | None = None,
     ) -> CanalizacionCRM:
         self.canalizaciones.append(
             {
@@ -531,6 +549,7 @@ class MockCRMClient(CRMClient):
                 "folio_cotizacion": folio_cotizacion,
                 "rfc": rfc,
                 "referencia_contacto": referencia_contacto,
+                "url_conversacion": url_conversacion,
             }
         )
         return CanalizacionCRM(

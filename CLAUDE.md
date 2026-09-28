@@ -405,6 +405,13 @@ Cuatro cosas que el código cuida y conviene no romper:
   fallar igual. Si un mensaje no llega a la bandeja a media conversación, el
   aviso también lo lleva.
 
+**La liga a la conversación llega al CRM.** Al escalar, la nota del prospecto
+(`/ingest/handoffs`) lleva `conversationUrl` —el panel de Chatwoot,
+`/app/accounts/{cuenta}/conversations/{id}`— y la ficha la muestra como botón
+«Seguimiento en Chatwoot», junto al de WhatsApp. Si Chatwoot no respondió no hay
+liga, y la nota dice qué teléfono se le dio al cliente. Un CRM anterior que
+rechace el campo recibe la nota sin la liga: el resumen vale más que el botón.
+
 **El token es de un USUARIO administrador, no de un Agent Bot.** Chatwoot (v4.17)
 solo deja a los bots crear conversaciones y mensajes; buscar y crear el contacto
 —lo primero que hace el bot— le responde 401 *"not authorized for bots"*.
@@ -443,7 +450,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 565 tests pasando
+pytest -q                  # 570 tests pasando
 ```
 
 ## Estado actual y fases
