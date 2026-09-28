@@ -33,7 +33,7 @@ from ..errores import AUTO, detalle_http
 from ..menus import BOTONES_PROVEEDOR, menu_proveedor
 from ..replies import Reply
 from ..sesiones import SesionCliente, SesionProveedorStore
-from .base import BaseAgent
+from .base import BaseAgent, Herramienta
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,9 @@ class ProveedoresAgent(BaseAgent):
     def tools(self) -> list[dict]:
         return TOOLS
 
-    async def decorate(self, phone: str, texto: str) -> Reply:
+    async def decorate(
+        self, phone: str, texto: str, herramientas: list[Herramienta] | None = None
+    ) -> Reply:
         """Menú completo justo al identificarse; botones de seguimiento después."""
         sesion = await self._sesiones.leer(phone)
         if sesion is None:
