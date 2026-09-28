@@ -73,6 +73,7 @@ CHATWOOT_ACCOUNT_ID=1
 CHATWOOT_INBOX_ID=7
 CHATWOOT_WEBHOOK_SECRET=...                       # obligatorio en producción
 HANDOFF_TTL_SECONDS=28800                         # 8 h (un turno)
+ASESOR_TELEFONO_RESPALDO=524461312914             # si Chatwoot no puede; vacío = sin respaldo
 ```
 
 `CHATWOOT_BASE_URL=mock` levanta un Chatwoot simulado en memoria, útil para
@@ -82,6 +83,13 @@ probar el flujo completo en local sin instancia.
 dice al cliente que no puede pasarlo con un asesor, en vez de prometerle uno que
 nadie avisó. Ese era exactamente el comportamiento anterior a esto — decía "un
 asesor continuará en breve" y solo escribía en el log.
+
+Y en ese mismo mensaje le da **a dónde acudir**: el teléfono de asesores
+(`ASESOR_TELEFONO_RESPALDO`) con una liga `https://wa.me/…` para llamar o
+escribir. Aplica igual si Chatwoot está configurado pero rechaza o no contesta.
+Antes el prompt le pedía "ofrecer el teléfono de oficina" sin que el bot tuviera
+ninguno cargado, y lo único que el cliente oía era que el canal no estaba
+disponible.
 
 ---
 

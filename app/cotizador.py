@@ -71,7 +71,7 @@ from .menus import (
     ZONAS_ENTREGA_CHICA,
 )
 from .models import CatalogoCRM, ProductoCRM
-from .replies import Boton, MenuLista, OpcionLista, Reply
+from .replies import MAX_FILAS_LISTA, Boton, MenuLista, OpcionLista, Reply
 from .sesiones import SesionClienteStore
 
 if TYPE_CHECKING:
@@ -292,7 +292,12 @@ class CotizadorGuiado:
         catalogo, problema = await self._catalogo()
         if problema is not None:
             return problema
-        return Reply(texto=texto, lista=self._menu_granos(catalogo))
+        menu = self._menu_granos(catalogo)
+        if menu is None:
+            # El texto es del modelo: se respeta, y en vez de una lista vacía
+            # (que Meta rechaza) van las salidas de siempre.
+            return Reply(texto=texto, botones=[BOTON_ASESOR, BOTON_MENU])
+        return Reply(texto=texto, lista=menu)
 
     async def botones_para(self, telefono: str) -> Reply | None:
         """Los botones del paso pendiente, para colgárselos a una respuesta del
@@ -315,12 +320,11 @@ class CotizadorGuiado:
         catalogo, problema = await self._catalogo()
         if problema is not None:
             return await self._responder(telefono, dijo, problema)
-        reply = Reply(
-            texto=(
-                "Con gusto le preparo su cotización. 🌾\n"
-                "¿Qué grano necesita? Toque «Ver granos» para elegirlo."
-            ),
-            lista=self._menu_granos(catalogo),
+        reply = self._pregunta_grano(
+            catalogo,
+            "Con gusto le preparo su cotización. 🌾\n"
+            "¿Qué grano necesita? Toque «Ver granos» para elegirlo.",
+            saludo="Con gusto le preparo su cotización. 🌾\n",
         )
         return await self._responder(telefono, dijo, reply)
 
@@ -332,9 +336,10 @@ class CotizadorGuiado:
             return await self._responder(telefono, dijo, problema)
         producto = next((p for p in catalogo.productos if p.sku == sku), None)
         if producto is None:
-            reply = Reply(
-                texto="Ese grano ya no está en la lista. ¿Cuál de estos le cotizo?",
-                lista=self._menu_granos(catalogo),
+            reply = self._pregunta_grano(
+                catalogo,
+                "Ese grano ya no está en la lista. ¿Cuál de estos le cotizo?",
+                saludo="Ese grano ya no está en la lista.\n",
             )
             return await self._responder(telefono, dijo, reply)
         return await self._fijar_producto(telefono, estado, producto, dijo)
@@ -427,7 +432,7 @@ class CotizadorGuiado:
             catalogo, problema = await self._catalogo()
             if problema is not None:
                 return await self._responder(telefono, "Quiero cambiar el grano.", problema)
-            reply = Reply(texto="¿Qué grano le cotizo?", lista=self._menu_granos(catalogo))
+            reply = self._pregunta_grano(catalogo, "¿Qué grano le cotizo?")
             return await self._responder(telefono, "Quiero cambiar el grano.", reply)
         elif boton == COT_CAMBIAR_TONELADAS:
             for campo in ("volumen", "toneladas"):
@@ -570,7 +575,7 @@ class CotizadorGuiado:
             catalogo, problema = await self._catalogo()
             if problema is not None:
                 return problema
-            return Reply(texto="¿Qué grano le cotizo?", lista=self._menu_granos(catalogo))
+            return self._pregunta_grano(catalogo, "¿Qué grano le cotizo?")
         if paso == "volumen":
             return Reply(
                 texto=f"¿Cuántas toneladas de *{producto}* necesita?",
@@ -722,16 +727,47 @@ class CotizadorGuiado:
         return catalogo, None
 
     @staticmethod
-    def _menu_granos(catalogo: CatalogoCRM) -> MenuLista:
-        """La lista de granos, del catálogo. Sin precio a propósito: el guion
-        pide calificar antes de dar precio, y el precio va en el resumen."""
+    def _menu_granos(catalogo: CatalogoCRM) -> MenuLista | None:
+        """La lista de granos que HAY, del catálogo; None si no hay ninguno.
+
+        Solo entra lo que está en existencia (`stock`), subproductos incluidos:
+        el menú es lo que se le ofrece a un cliente, y ofrecerle lo que no hay
+        para luego decirle "sobre pedido" es hacerle perder un toque. Lo que va
+        sobre pedido se sigue cotizando si lo escribe: no se esconde, solo no
+        se anuncia.
+
+        Sin precio a propósito: el guion pide calificar antes de dar precio, y
+        el precio va en el resumen."""
         opciones = []
-        for p in catalogo.productos[:10]:
+        for p in catalogo.productos:
+            if p.disponibilidad != "stock":
+                continue
             detalle = DISPONIBILIDAD.get(p.disponibilidad, "")
             if p.precio_unitario is None:
                 detalle = f"{detalle} · precio con asesor" if detalle else "Precio con asesor"
             opciones.append(OpcionLista(f"{PREFIJO_PRODUCTO}{p.sku}", p.nombre, detalle))
-        return MenuLista(boton="Ver granos", seccion="Granos", opciones=opciones)
+        if not opciones:
+            return None
+        # El tope de Meta se aplica DESPUÉS de filtrar: recortar antes podía
+        # dejar fuera un grano disponible por uno que no lo está.
+        return MenuLista(
+            boton="Ver granos", seccion="Granos", opciones=opciones[:MAX_FILAS_LISTA]
+        )
+
+    @classmethod
+    def _pregunta_grano(cls, catalogo: CatalogoCRM, texto: str, saludo: str = "") -> Reply:
+        """"¿Qué grano?" con la lista de lo que hay, o —si hoy no hay nada en
+        existencia— la verdad y una salida, en vez de una lista vacía."""
+        menu = cls._menu_granos(catalogo)
+        if menu is not None:
+            return Reply(texto=texto, lista=menu)
+        return Reply(
+            texto=(
+                f"{saludo}Hoy no tengo grano en existencia: se surte sobre pedido. "
+                "Escríbame qué grano necesita y se lo cotizo, o le paso con un asesor."
+            ),
+            botones=[BOTON_ASESOR, BOTON_MENU],
+        )
 
     async def _responder(self, telefono: str, dijo: str, reply: Reply) -> Reply:
         """Deja el intercambio en el historial de Ventas y devuelve la respuesta.

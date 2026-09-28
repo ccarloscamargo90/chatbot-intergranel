@@ -24,7 +24,7 @@ from .fletes import (
     es_solicitud_de_flete,
     interpretar_respuesta,
 )
-from .handoff import HandoffStore
+from .handoff import HandoffStore, asesor_de_respaldo
 from .menus import BOTONES_SEGUIMIENTO
 from .models import ChatwootEvent, ErpAvisoEvent, InventoryAlertEvent, OrderEvent
 from .notifications import notify_erp_aviso, notify_inventory_alert, notify_order_event
@@ -231,11 +231,14 @@ async def _reenviar_al_asesor(activo, message: dict, phone: str) -> None:
         # Si el mensaje no llegó a la bandeja, nadie lo va a leer. Decírselo es
         # mejor que dejarlo creyendo que un asesor lo está viendo.
         logger.exception("No se pudo reenviar a Chatwoot el mensaje de %s", phone)
-        await wa.send_text(
-            phone,
+        aviso = (
             "No logramos entregar su mensaje al asesor. ¿Puede intentarlo de "
-            "nuevo en un momento?",
+            "nuevo en un momento?"
         )
+        respaldo = asesor_de_respaldo()
+        if respaldo is not None:
+            aviso = f"{aviso}\n\nSi le urge:\n{respaldo.texto()}"
+        await wa.send_text(phone, aviso)
 
 
 async def _capturar_flete(phone: str, message_id: str | None, texto: str) -> bool:

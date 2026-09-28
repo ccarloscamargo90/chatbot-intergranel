@@ -14,6 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main, tareas
+from app.agents import soporte as soporte_mod
+from app.agents.base import Herramienta
 from app.bus import InMemoryEventBus
 from app.chatwoot import (
     ChatwootNoDisponible,
@@ -22,7 +24,8 @@ from app.chatwoot import (
 )
 from app.crm import CRMNoDisponible, MockCRMClient
 from app.dedup import InMemoryDedupStore
-from app.handoff import HandoffStore
+from app.handoff import HandoffStore, asesor_de_respaldo
+from app.menus import ASESOR
 
 client = TestClient(main.app)
 
@@ -113,6 +116,91 @@ def test_si_chatwoot_falla_lo_dice_y_no_deja_el_handoff_abierto(soporte):
     assert asyncio.run(soporte._handoff.por_telefono(PHONE)) is None
 
 
+# ------------- El teléfono de asesores, cuando Chatwoot no puede ----------- #
+#
+# Pidió una persona y no se la pudimos dar por aquí: sale con un número al que
+# llamar o escribir. Lo escribe el código, no el modelo: un teléfono dictado por
+# un modelo puede salir con un dígito cambiado.
+
+LIGA = "https://wa.me/524461312914"
+
+
+@pytest.mark.parametrize(
+    "configurado", ["524461312914", "4461312914", "+52 446 131 2914", "5214461312914"]
+)
+def test_el_respaldo_acepta_el_numero_como_venga(configurado):
+    respaldo = asesor_de_respaldo(configurado)
+    assert respaldo is not None
+    assert respaldo.telefono == "446 131 2914"
+    assert respaldo.whatsapp == LIGA
+
+
+@pytest.mark.parametrize("configurado", ["", "12345", "446-131"])
+def test_sin_numero_completo_no_hay_respaldo(configurado):
+    """Un número a medias es mandar al cliente a marcarle a otro."""
+    assert asesor_de_respaldo(configurado) is None
+
+
+def test_el_respaldo_por_omision_es_el_de_asesores():
+    respaldo = asesor_de_respaldo()
+    assert respaldo is not None and respaldo.whatsapp == LIGA
+
+
+def _chatwoot_roto() -> MockChatwootClient:
+    class Rota(MockChatwootClient):
+        async def abrir_conversacion(self, telefono, nombre="", atributos=None):
+            raise ChatwootNoDisponible("502 del reverse proxy")
+
+    return Rota()
+
+
+@pytest.mark.parametrize("chatwoot", [NullChatwootClient, _chatwoot_roto])
+def test_si_no_se_puede_escalar_ofrece_el_telefono_de_asesores(soporte, chatwoot):
+    soporte._chatwoot = chatwoot()
+    data = _run(soporte, "escalar_a_humano", {"motivo": "quiere hablar con alguien"})
+
+    assert data["escalado"] is False
+    assert data["asesor_de_respaldo"] == {"telefono": "446 131 2914", "whatsapp": LIGA}
+    # Lo pega el código: el modelo no lo teclea, ni promete una llamada.
+    assert "NO los escribas" in data["instruccion"]
+    assert "NO le prometas" in data["instruccion"]
+
+
+def _turno_de_escalamiento_fallido(soporte) -> list[Herramienta]:
+    soporte._chatwoot = NullChatwootClient()
+    crudo = asyncio.run(soporte.run_tool("escalar_a_humano", {"motivo": "reclamo"}, PHONE))
+    return [Herramienta("escalar_a_humano", {"motivo": "reclamo"}, crudo)]
+
+
+def test_el_numero_y_la_liga_van_pegados_a_la_respuesta(soporte):
+    herramientas = _turno_de_escalamiento_fallido(soporte)
+    reply = asyncio.run(
+        soporte.decorate(PHONE, "Por este chat no pude pasarlo con un asesor.", herramientas)
+    )
+
+    assert reply.texto.startswith("Por este chat no pude pasarlo con un asesor.")
+    assert "*446 131 2914*" in reply.texto
+    assert LIGA in reply.texto
+    # Tocar "Asesor" otra vez volvería a fallar igual.
+    assert ASESOR not in [b.id for b in reply.botones]
+    assert reply.botones
+
+
+def test_si_el_modelo_ya_puso_la_liga_no_se_repite(soporte):
+    herramientas = _turno_de_escalamiento_fallido(soporte)
+    reply = asyncio.run(soporte.decorate(PHONE, f"Escríbanos aquí: {LIGA}", herramientas))
+    assert reply.texto.count(LIGA) == 1
+
+
+def test_sin_respaldo_configurado_solo_dice_que_no_se_pudo(soporte, monkeypatch):
+    monkeypatch.setattr(soporte_mod, "asesor_de_respaldo", lambda: None)
+    herramientas = _turno_de_escalamiento_fallido(soporte)
+
+    assert "asesor_de_respaldo" not in json.loads(herramientas[0].resultado)
+    reply = asyncio.run(soporte.decorate(PHONE, "No pude pasarlo.", herramientas))
+    assert reply.texto == "No pude pasarlo."
+
+
 # ------------------------------ Ida: cliente -> Chatwoot ------------------- #
 @pytest.fixture
 def handoff_activo(monkeypatch):
@@ -185,6 +273,9 @@ def test_si_no_llega_a_la_bandeja_se_le_avisa_al_cliente(handoff_activo, monkeyp
 
     assert len(enviados) == 1
     assert "no logramos entregar" in enviados[0].lower()
+    # Y si le urge, a dónde acudir mientras tanto.
+    assert "446 131 2914" in enviados[0]
+    assert LIGA in enviados[0]
 
 
 # ---------------------------- Vuelta: asesor -> cliente -------------------- #

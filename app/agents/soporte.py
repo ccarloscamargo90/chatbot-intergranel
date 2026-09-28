@@ -33,8 +33,8 @@ from ..chatwoot import ChatwootClient, ChatwootNoDisponible, get_chatwoot_client
 from ..crm import CRMNoDisponible
 from ..erp import DocumentoNoRecuperable, DocumentoSinArchivo, SesionClienteInvalida
 from ..errores import AUTO, detalle_http
-from ..handoff import HandoffStore
-from ..menus import BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
+from ..handoff import AsesorDeRespaldo, HandoffStore, asesor_de_respaldo
+from ..menus import ASESOR, BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
 from ..replies import Reply
 from ..seguimiento import siguiente_a_la_consulta
 from ..sesiones import SesionCliente, SesionClienteStore
@@ -368,6 +368,16 @@ class SoporteAgent(BaseAgent):
         if await self._handoff.por_telefono(phone) is not None:
             return Reply(texto=texto)
 
+        # No se pudo pasar con un asesor: el teléfono de respaldo va pegado aquí,
+        # tomado del resultado de la herramienta y no del texto del modelo. Sin
+        # el botón de Asesor: tocarlo volvería a fallar igual.
+        respaldo = _respaldo_ofrecido(herramientas)
+        if respaldo is not None:
+            if respaldo.whatsapp not in texto:
+                texto = f"{texto}\n\n{respaldo.texto()}".strip()
+            botones = [b for b in BOTONES_SEGUIMIENTO if b.id != ASESOR]
+            return Reply(texto=texto, botones=botones)
+
         sesion = await self._sesiones.leer(phone)
         if sesion is not None and sesion.recien_abierta():
             return Reply(
@@ -514,15 +524,12 @@ class SoporteAgent(BaseAgent):
                 "Escalamiento sin Chatwoot configurado (%s): %s", telefono, motivo
             )
             self._contexto_al_crm(telefono, sesion_para_el_crm, motivo, atendido=False)
-            return {
-                "escalado": False,
-                "motivo": "canal_no_configurado",
-                "instruccion": (
-                    "Dile que en este momento no puedes pasarlo con un asesor y "
-                    "ofrécele el teléfono de oficina o que escriba más tarde. NO "
-                    "le prometas que alguien lo contactará."
-                ),
-            }
+            return self._no_escalado(
+                "canal_no_configurado",
+                "Dile que en este momento no puedes pasarlo con un asesor por este "
+                "chat y pídele que escriba más tarde. NO le prometas que alguien lo "
+                "contactará.",
+            )
 
         sesion = sesion_para_el_crm
         try:
@@ -540,15 +547,12 @@ class SoporteAgent(BaseAgent):
             # silencio es alguien esperando una respuesta que no va a llegar.
             logger.error("No se pudo escalar %s a Chatwoot: %s", telefono, exc)
             self._contexto_al_crm(telefono, sesion, motivo, atendido=False)
-            return {
-                "escalado": False,
-                "motivo": "chatwoot_no_disponible",
-                "instruccion": (
-                    "Dile con honestidad que no lograste pasarlo con un asesor "
-                    "en este momento y pídele que lo intente en unos minutos. NO "
-                    "le prometas que alguien lo contactará."
-                ),
-            }
+            return self._no_escalado(
+                "chatwoot_no_disponible",
+                "Dile con honestidad que no lograste pasarlo con un asesor en este "
+                "momento y pídele que lo intente en unos minutos. NO le prometas "
+                "que alguien lo contactará.",
+            )
 
         logger.info(
             "Escalado %s a la conversación %s de Chatwoot", telefono, conversacion.id
@@ -560,6 +564,34 @@ class SoporteAgent(BaseAgent):
                 "Confírmale que ya lo estás pasando con un asesor y que a partir "
                 "de ahora le responderá una persona. Despídete en UN mensaje "
                 "corto: lo que escriba después ya lo lee el asesor, no tú."
+            ),
+        }
+
+    @staticmethod
+    def _no_escalado(motivo: str, sin_respaldo: str) -> dict:
+        """El "no se pudo" del escalamiento, con el teléfono de asesores si hay.
+
+        Sea cual sea la causa, el cliente pidió una persona: sale con un número
+        al que llamar o escribir. El número NO lo escribe el modelo —se lo pega
+        `decorate` abajo de su mensaje, tomado de este resultado—, así que la
+        instrucción le pide no repetirlo.
+        """
+        respaldo = asesor_de_respaldo()
+        if respaldo is None:
+            return {"escalado": False, "motivo": motivo, "instruccion": sin_respaldo}
+        return {
+            "escalado": False,
+            "motivo": motivo,
+            "asesor_de_respaldo": {
+                "telefono": respaldo.telefono,
+                "whatsapp": respaldo.whatsapp,
+            },
+            "instruccion": (
+                "Dile con honestidad, en una o dos líneas, que por este chat no "
+                "pudiste pasarlo con un asesor y que lo atienden en el teléfono de "
+                "asesores, por llamada o por WhatsApp. El número y la liga le "
+                "aparecen abajo de tu mensaje: NO los escribas tú. NO le prometas "
+                "que alguien lo contactará."
             ),
         }
 
@@ -860,3 +892,23 @@ class SoporteAgent(BaseAgent):
                 },
                 ensure_ascii=False,
             )
+
+
+def _respaldo_ofrecido(herramientas: list[Herramienta] | None) -> AsesorDeRespaldo | None:
+    """El teléfono de asesores que ofreció un escalamiento fallido en este turno."""
+    for h in reversed(herramientas or []):
+        if h.nombre != "escalar_a_humano":
+            continue
+        try:
+            datos = json.loads(h.resultado)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(datos, dict) or datos.get("escalado") is not False:
+            return None
+        respaldo = datos.get("asesor_de_respaldo")
+        if not isinstance(respaldo, dict):
+            return None
+        if not respaldo.get("telefono") or not respaldo.get("whatsapp"):
+            return None
+        return AsesorDeRespaldo(telefono=respaldo["telefono"], whatsapp=respaldo["whatsapp"])
+    return None

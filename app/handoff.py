@@ -16,6 +16,7 @@ hablándole al vacío si nadie resuelve la conversación. Al vencer, el bot reto
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,54 @@ from .config import get_settings
 
 TELEFONO_PREFIX = "bus:handoff:telefono:"
 CONVERSACION_PREFIX = "bus:handoff:conversacion:"
+
+
+@dataclass(frozen=True)
+class AsesorDeRespaldo:
+    """A dónde mandar al cliente cuando Chatwoot no lo puede recibir.
+
+    Escalar a Chatwoot puede fallar por muchas razones —no está configurado, la
+    instancia está caída, rechaza la llamada— y en todas el cliente se queda
+    igual: pidió una persona y no se la dieron. Con esto, al menos sale con un
+    número al que llamar o escribir.
+    """
+
+    #: Como lo lee una persona: "446 131 2914".
+    telefono: str
+    #: Liga que abre el chat de WhatsApp con ese número.
+    whatsapp: str
+
+    def texto(self) -> str:
+        """El renglón que se le pega al mensaje. Lo arma el código, no el modelo:
+        un número de teléfono dictado por un modelo es un número que puede salir
+        con un dígito cambiado."""
+        return (
+            f"📞 Llame o escriba por WhatsApp a un asesor al *{self.telefono}*:\n"
+            f"{self.whatsapp}"
+        )
+
+
+def asesor_de_respaldo(configurado: str | None = None) -> AsesorDeRespaldo | None:
+    """El teléfono de respaldo configurado (`ASESOR_TELEFONO_RESPALDO`), o None.
+
+    Acepta 10 dígitos (se asume México, +52), el internacional sin '+' y el
+    celular con el "1" histórico (521…), que wa.me ya no necesita.
+    """
+    crudo = get_settings().asesor_telefono_respaldo if configurado is None else configurado
+    digitos = re.sub(r"\D", "", crudo or "")
+    if len(digitos) == 10:
+        digitos = "52" + digitos
+    if len(digitos) == 13 and digitos.startswith("521"):
+        digitos = "52" + digitos[3:]
+    if len(digitos) < 11:
+        # Un número a medias no se le da a nadie: es mandarlo a marcar a otro.
+        return None
+    if len(digitos) == 12 and digitos.startswith("52"):
+        n = digitos[2:]
+        legible = f"{n[:3]} {n[3:6]} {n[6:]}"
+    else:
+        legible = f"+{digitos}"
+    return AsesorDeRespaldo(telefono=legible, whatsapp=f"https://wa.me/{digitos}")
 
 
 @dataclass

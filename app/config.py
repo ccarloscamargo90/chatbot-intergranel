@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     # que nadie se quede hablándole al vacío si la conversación no se resuelve:
     # al vencer, el bot retoma. Un turno de trabajo por defecto.
     handoff_ttl_seconds: int = 8 * 60 * 60
+    # Teléfono de asesores al que se manda al cliente cuando NO se le puede
+    # pasar con una persona por Chatwoot (sin configurar, caído o rechazando).
+    # Sin esto el bot solo podía decir "no se pudo", y el cliente se quedaba sin
+    # a quién acudir. El bot le manda el número y una liga de WhatsApp
+    # (https://wa.me/...) para que llame o escriba ahí.
+    #
+    # Formato: 10 dígitos o internacional sin '+' (4461312914 o 524461312914).
+    # Vacío = sin respaldo: el bot solo dice que no se pudo y que lo intente
+    # más tarde.
+    asesor_telefono_respaldo: str = "524461312914"
 
     # --- Agente de Inventario ---
     # Lista blanca de teléfonos autorizados a consultar existencias, igual que
