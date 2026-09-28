@@ -88,7 +88,7 @@ El recordatorio del domingo trae el mismo `tipo`. El bot marca el teléfono
 
 Requisitos: `AVISOS_WHATSAPP_ENABLED=true` en el ERP y la plantilla `erp_aviso`
 aprobada (a las 7:00 casi nadie tiene la ventana de 24 h abierta). La regla
-`precios.semanal_solicitud` la crea la migración 239, activa.
+`precios.semanal_solicitud` la crea la migración 240, activa.
 
 ## 4. Los endpoints de entrada (bot → ERP)
 
