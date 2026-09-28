@@ -10,10 +10,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import PlainTextResponse
 
 from . import tareas
 from .bus import get_event_bus
 from .chatwoot import ChatwootNoDisponible, get_chatwoot_client
+from .chatwoot_diagnostico import como_texto, diagnosticar
 from .config import get_settings
 from .dedup import get_dedup_store
 from .erp import get_erp_client
@@ -529,20 +531,43 @@ async def erp_notificacion(
 # mientras el teléfono está en handoff, lo que dice el cliente se reenvía a la
 # conversación de Chatwoot en vez de ir al agente.
 # --------------------------------------------------------------------------- #
+def _exigir_secreto_chatwoot(request: Request, x_webhook_secret: str) -> None:
+    """401 si el secreto de Chatwoot está configurado y no vino (header o ?secret=)."""
+    if settings.chatwoot_webhook_secret:
+        recibido = x_webhook_secret or request.query_params.get("secret", "")
+        if not hmac.compare_digest(recibido, settings.chatwoot_webhook_secret):
+            raise HTTPException(status_code=401, detail="Secreto inválido")
+
+
+@app.get("/diagnostico/chatwoot", response_class=PlainTextResponse)
+async def diagnostico_chatwoot(
+    request: Request, x_webhook_secret: str = Header(default="")
+) -> PlainTextResponse:
+    """¿Quedó bien conectado Chatwoot? Una línea por revisión, en palabras.
+
+    Se abre en el navegador: `https://<bot>/diagnostico/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`.
+    Pide el mismo secreto que el webhook porque consulta Chatwoot con el token
+    del bot; sin secreto configurado queda abierta, y es lo primero que marca.
+    Nunca imprime el token ni el secreto.
+    """
+    _exigir_secreto_chatwoot(request, x_webhook_secret)
+    # Detrás del proxy de Railway, el host público llega en estos encabezados.
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    chequeos = await diagnosticar(settings, host_publico=host.split(",")[0].strip())
+    return PlainTextResponse(como_texto(chequeos))
+
+
 @app.post("/webhooks/chatwoot")
 async def chatwoot_webhook(
     event: ChatwootEvent,
     request: Request,
     x_webhook_secret: str = Header(default=""),
 ) -> dict:
-    # Chatwoot NO firma sus webhooks. Sin un secreto compartido, cualquiera que
-    # descubra esta URL puede hacerle decir al bot lo que quiera por WhatsApp,
-    # a nombre de la empresa. El header es lo preferible; el query param existe
-    # porque la UI de Chatwoot solo deja capturar una URL.
-    if settings.chatwoot_webhook_secret:
-        recibido = x_webhook_secret or request.query_params.get("secret", "")
-        if not hmac.compare_digest(recibido, settings.chatwoot_webhook_secret):
-            raise HTTPException(status_code=401, detail="Secreto inválido")
+    # Sin un secreto compartido, cualquiera que descubra esta URL puede hacerle
+    # decir al bot lo que quiera por WhatsApp, a nombre de la empresa. El header
+    # es lo preferible; el query param existe porque la UI de Chatwoot solo deja
+    # capturar una URL.
+    _exigir_secreto_chatwoot(request, x_webhook_secret)
 
     conversacion_id = event.conversacion_id
     if conversacion_id is None:

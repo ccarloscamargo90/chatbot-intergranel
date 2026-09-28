@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .config import get_settings
+from .errores import detalle_http
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class HTTPChatwootClient(ChatwootClient):
         except ChatwootNoDisponible:
             raise
         except Exception as exc:  # noqa: BLE001 - cualquier fallo se cuenta igual
-            raise ChatwootNoDisponible(f"{type(exc).__name__}: {exc}") from exc
+            raise ChatwootNoDisponible(detalle_http(exc, "Chatwoot")) from exc
         return ConversacionChatwoot(
             id=conversacion_id, contacto_id=contacto_id, source_id=source_id
         )
@@ -239,7 +240,7 @@ class HTTPChatwootClient(ChatwootClient):
                 )
                 resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
-            raise ChatwootNoDisponible(f"{type(exc).__name__}: {exc}") from exc
+            raise ChatwootNoDisponible(detalle_http(exc, "Chatwoot")) from exc
 
     async def resolver(self, conversacion_id: int) -> None:
         try:
@@ -250,7 +251,7 @@ class HTTPChatwootClient(ChatwootClient):
                 )
                 resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
-            raise ChatwootNoDisponible(f"{type(exc).__name__}: {exc}") from exc
+            raise ChatwootNoDisponible(detalle_http(exc, "Chatwoot")) from exc
 
 
 @dataclass

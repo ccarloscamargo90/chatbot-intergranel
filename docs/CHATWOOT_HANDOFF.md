@@ -36,31 +36,51 @@ Cliente ⇄ Meta ⇄ │      chatbot       │  ⇄     │       Chatwoot     
 
 ## 2. Qué hay que crear en Chatwoot
 
-Todo esto es de una sola vez, en la instancia self-hosted:
+Todo esto es de una sola vez, en la instancia self-hosted (probado contra
+Chatwoot **v4.17.0**, la que despliega el repo `chatwoot`):
 
-1. **Un inbox de tipo API** (Settings → Inboxes → Add Inbox → API).
+1. **Un inbox de tipo API** (Ajustes → Bandejas de entrada → Agregar → API).
    No un inbox de WhatsApp: el número lo tiene el bot, no Chatwoot. Este inbox
-   es solo el buzón donde aterrizan las conversaciones escaladas.
-   Anota su **Inbox ID** (sale en la URL: `/app/accounts/1/settings/inboxes/**7**`).
-2. **Un token de API.** Con un *bot token* basta y es lo preferible (Settings →
-   Integrations → Agent Bots) porque no ata las acciones a una persona. Si no,
-   sirve el `access_token` del perfil de un agente dedicado.
+   es solo el buzón donde aterrizan las conversaciones escaladas. Deje vacío su
+   campo "Webhook URL": el aviso de vuelta va por el webhook del paso 4.
+   Agregue como miembros a los asesores que van a contestar.
+   Anote su **Inbox ID** (sale en la URL: `/app/accounts/1/settings/inboxes/**7**`).
+2. **El token de acceso de un usuario ADMINISTRADOR** (su foto, abajo a la
+   izquierda → Configuración del perfil → *Token de acceso*). Idealmente un
+   usuario dedicado ("Bot WhatsApp") para que las acciones no queden a nombre de
+   una persona.
+
+   **No sirve un token de Agent Bot.** Chatwoot solo deja a los bots crear
+   conversaciones y mensajes (`AccessTokenAuthHelper::BOT_ACCESSIBLE_ENDPOINTS`);
+   buscar y crear el contacto —lo primero que hace el bot al escalar— le
+   responde 401 *"Access to this endpoint is not authorized for bots"*. Una
+   versión anterior de esta guía lo recomendaba, y con él el escalamiento falla
+   siempre.
+
+   Administrador y no agente porque un agente solo ve las bandejas de las que
+   es miembro (`InboxPolicy#show?`) y no puede listar webhooks
+   (`WebhookPolicy`), así que el diagnóstico (sección 3) no podría revisarlos.
 3. **El account ID** — también sale en la URL: `/app/accounts/**1**/…`.
-4. **Un webhook** (Settings → Integrations → Webhooks) apuntando a
+4. **Un webhook** (Ajustes → Integraciones → Webhooks) apuntando a
    `https://<tu-bot>/webhooks/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`,
    suscrito a **`message_created`** y **`conversation_status_changed`**.
 
 ### Sobre el secreto en la URL
 
-Chatwoot **no firma** sus webhooks. Sin un secreto compartido, cualquiera que
-descubra la URL puede hacerle decir al bot lo que quiera por WhatsApp a nombre de
-la empresa — por eso el secreto no es opcional en producción.
+Sin un secreto compartido, cualquiera que descubra la URL puede hacerle decir al
+bot lo que quiera por WhatsApp a nombre de la empresa — por eso el secreto no es
+opcional en producción.
 
-El endpoint lo acepta de dos formas: header `X-Webhook-Secret` (preferible) o
-query param `?secret=`. La UI de Chatwoot solo deja capturar una URL, así que en
-la práctica será el query param, con el costo conocido de que queda escrito en
-los logs de acceso del proxy. Si su reverse proxy puede inyectar el header, es
-mejor camino; rótelo si el log se comparte.
+El endpoint lo acepta de dos formas: header `X-Webhook-Secret` o query param
+`?secret=`. La UI de Chatwoot solo deja capturar una URL, así que en la práctica
+será el query param, con el costo conocido de que queda escrito en los logs de
+acceso del proxy; rótelo si el log se comparte.
+
+Chatwoot v4.17 **sí firma** sus webhooks (`X-Chatwoot-Signature` =
+HMAC-SHA256 de `"<timestamp>.<cuerpo>"` con el secreto que genera para cada
+webhook, en `lib/webhooks/trigger.rb`). El bot todavía no verifica esa firma: se
+queda con el secreto de la URL, que funciona con cualquier versión. Verificarla
+es la mejora natural si algún día el secreto en la URL estorba.
 
 ---
 
@@ -90,6 +110,24 @@ escribir. Aplica igual si Chatwoot está configurado pero rechaza o no contesta.
 Antes el prompt le pedía "ofrecer el teléfono de oficina" sin que el bot tuviera
 ninguno cargado, y lo único que el cliente oía era que el canal no estaba
 disponible.
+
+### ¿Quedó bien? El diagnóstico
+
+Con las variables puestas, abra en el navegador:
+
+```
+https://<tu-bot>/diagnostico/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>
+```
+
+Hace las MISMAS llamadas que el bot al escalar, con el mismo token, y contesta
+una línea por revisión (`app/chatwoot_diagnostico.py`): la dirección, de quién es
+el token y si es de un Agent Bot, la cuenta, que la bandeja exista y sea de tipo
+API, que pueda buscar contactos, y que el webhook apunte a este bot con el mismo
+secreto y los dos eventos. Lo que no puede comprobar lo dice como ⚠️, nunca
+como ✅. No imprime el token ni el secreto: se puede compartir en una captura.
+
+Pide el mismo secreto que el webhook. Sin `CHATWOOT_WEBHOOK_SECRET` queda
+abierta, y es lo primero que marca como falla.
 
 ---
 

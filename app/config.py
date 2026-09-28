@@ -114,12 +114,17 @@ class Settings(BaseSettings):
     # Vacío = deshabilitado: escalar avisa que no se pudo y lo deja en el log.
     # "mock" = Chatwoot simulado en memoria (desarrollo).
     chatwoot_base_url: str = ""
+    # Token de acceso de un USUARIO administrador (Configuración del perfil →
+    # Token de acceso). Uno de Agent Bot no sirve: Chatwoot no le deja buscar ni
+    # crear contactos, y el escalamiento falla siempre. /diagnostico/chatwoot lo
+    # detecta.
     chatwoot_api_token: str = ""
     chatwoot_account_id: int = 0
     chatwoot_inbox_id: int = 0
-    # Secreto compartido que Chatwoot manda en el webhook de vuelta. Chatwoot no
-    # firma sus webhooks, así que sin esto cualquiera podría hacerle decir al bot
-    # lo que quisiera por WhatsApp. Vacío = sin verificar (solo desarrollo).
+    # Secreto compartido que Chatwoot manda en la URL del webhook de vuelta
+    # (?secret=). Sin esto cualquiera podría hacerle decir al bot lo que quisiera
+    # por WhatsApp. También protege /diagnostico/chatwoot. Vacío = sin verificar
+    # (solo desarrollo).
     chatwoot_webhook_secret: str = ""
     # Cuánto dura como mucho una conversación en manos del asesor. Existe para
     # que nadie se quede hablándole al vacío si la conversación no se resuelve:

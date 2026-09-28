@@ -36,6 +36,7 @@ app/
   precio_semanal.py    ← El precio de la semana que dicta el responsable los sábados
   sesiones.py          ← Sesión del cliente identificado, sobre el bus
   chatwoot.py          ← Bandeja del asesor humano (abstracto + HTTP + mock)
+  chatwoot_diagnostico.py ← /diagnostico/chatwoot: ¿quedó bien conectado Chatwoot?
   handoff.py           ← Quién está con un asesor y no con el bot
   agents/
     base.py            ← BaseAgent: loop agéntico (Claude + tools + historial)
@@ -58,7 +59,7 @@ tests/
   test_ventas.py, test_erp.py, test_history.py, test_dedup.py,
   test_media.py, test_signature.py, test_soporte.py, test_compras.py,
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
-  test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py,
+  test_chatwoot.py, test_chatwoot_diagnostico.py, test_documentos.py, test_proveedores.py, test_fletes.py,
   test_crm.py, test_cotizacion_pdf.py, test_resumen.py, test_tareas.py,
   test_atribucion.py, test_cotizador.py, test_seguimiento.py, test_precio_semanal.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks (ERP, CRM, Chatwoot)
@@ -404,6 +405,17 @@ Cuatro cosas que el código cuida y conviene no romper:
   fallar igual. Si un mensaje no llega a la bandeja a media conversación, el
   aviso también lo lleva.
 
+**El token es de un USUARIO administrador, no de un Agent Bot.** Chatwoot (v4.17)
+solo deja a los bots crear conversaciones y mensajes; buscar y crear el contacto
+—lo primero que hace el bot— le responde 401 *"not authorized for bots"*.
+
+**¿Quedó bien?** `GET /diagnostico/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`
+(`app/chatwoot_diagnostico.py`) hace las mismas llamadas que el bot al escalar y
+dice, una línea por revisión, qué falta: dirección, tipo de token, cuenta,
+bandeja de tipo API, permiso de contactos y el webhook (dominio, secreto y los
+dos eventos). Lo que no puede comprobar lo marca ⚠️, nunca ✅, y no imprime el
+token ni el secreto.
+
 Contrato completo y qué crear en la instancia: `docs/CHATWOOT_HANDOFF.md`.
 
 ## Transferencias entre agentes
@@ -431,7 +443,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 539 tests pasando
+pytest -q                  # 565 tests pasando
 ```
 
 ## Estado actual y fases
@@ -952,7 +964,7 @@ COTIZACION_IVA_TASA (0 = el PDF no menciona impuestos; 0.16 = separa IVA y va al
 COTIZACION_VIGENCIA_DIAS (0 = el PDF no lleva vigencia y dice que hay que confirmar)
 CHATWOOT_BASE_URL (vacío = escalamiento deshabilitado; "mock" = simulado)
 CHATWOOT_API_TOKEN, CHATWOOT_ACCOUNT_ID, CHATWOOT_INBOX_ID
-CHATWOOT_WEBHOOK_SECRET (obligatorio en producción: Chatwoot no firma)
+CHATWOOT_WEBHOOK_SECRET (obligatorio en producción; también protege /diagnostico/chatwoot)
 HANDOFF_TTL_SECONDS (8h; al vencer el bot retoma)
 ASESOR_TELEFONO_RESPALDO (524461312914; a dónde se manda al cliente si Chatwoot
   no puede recibirlo. Vacío = el bot solo dice que no se pudo)
