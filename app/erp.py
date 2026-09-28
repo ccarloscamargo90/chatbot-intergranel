@@ -44,10 +44,12 @@ from .models import (
     InventoryItem,
     Order,
     OrderLine,
+    PendientePrecioSemanal,
     Price,
     PurchaseOrder,
     PurchaseRequest,
     Quote,
+    RespuestaPrecioSemanal,
     Supplier,
     SupplierInvoice,
     SupplierPurchaseOrder,
@@ -255,6 +257,30 @@ class ERPClient(abc.ABC):
     ) -> DepositoRespuestaFlete:
         """Deposita lo que contestó un transportista: el texto crudo y, aparte,
         lo que el bot entendió. Idempotente por `wamid`."""
+
+    # --- Precio de venta semanal ------------------------------------------ #
+    @abc.abstractmethod
+    async def precio_semanal_pendientes(self, telefono: str) -> list[PendientePrecioSemanal]:
+        """Qué productos le falta preciar a quien escribe, en todas las empresas.
+
+        Lista vacía = nada pendiente, y también lo que recibe un teléfono que no
+        es el del responsable: el ERP no confirma quién dicta los precios."""
+
+    @abc.abstractmethod
+    async def responder_precio_semanal(
+        self,
+        empresa: str,
+        solicitud_id: str,
+        producto_id: str,
+        telefono: str,
+        accion: str,
+        precio_centavos: int | None = None,
+        wamid: str | None = None,
+        texto: str | None = None,
+    ) -> RespuestaPrecioSemanal:
+        """Registra lo que el responsable CONFIRMÓ para un producto.
+
+        `accion`: `precio` (con `precio_centavos`), `mismo` u `omitir`."""
 
 
 class HTTPERPClient(ERPClient):
@@ -571,6 +597,47 @@ class HTTPERPClient(ERPClient):
             resp.raise_for_status()
             return DepositoRespuestaFlete(**resp.json())
 
+    async def precio_semanal_pendientes(self, telefono: str) -> list[PendientePrecioSemanal]:
+        # El teléfono va en el CUERPO: en la URL quedaría escrito en los logs de
+        # acceso del proxy.
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/precio-semanal/pendientes", json={"telefono": telefono}
+            )
+            resp.raise_for_status()
+            return [PendientePrecioSemanal(**p) for p in resp.json().get("pendientes", [])]
+
+    async def responder_precio_semanal(
+        self,
+        empresa: str,
+        solicitud_id: str,
+        producto_id: str,
+        telefono: str,
+        accion: str,
+        precio_centavos: int | None = None,
+        wamid: str | None = None,
+        texto: str | None = None,
+    ) -> RespuestaPrecioSemanal:
+        cuerpo: dict = {
+            "empresa": empresa,
+            "solicitudId": solicitud_id,
+            "productoId": producto_id,
+            "telefono": telefono,
+            "accion": accion,
+        }
+        if precio_centavos is not None:
+            cuerpo["precioCentavos"] = precio_centavos
+        if wamid:
+            cuerpo["wamid"] = wamid
+        if texto:
+            cuerpo["texto"] = texto[:1000]
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base_url}/bot/precio-semanal/respuesta", json=cuerpo
+            )
+            resp.raise_for_status()
+            return RespuestaPrecioSemanal(**resp.json())
+
 
 # Precios simulados por tonelada (MXN). Las claves se comparan sin acentos.
 _MOCK_PRECIOS = {
@@ -826,6 +893,29 @@ class MockERPClient(ERPClient):
         # puedan mirarlo; y los wamid ya vistos, que es como el ERP deduplica.
         self.respuestas_flete: list[dict] = []
         self._wamids_flete: set[str] = set()
+        # Precio semanal: a quién se le preguntó, qué le falta y qué contestó.
+        # El teléfono se compara como en el ERP: con o sin el "1" de México.
+        self.telefono_responsable_precio = "525599990000"
+        self.pendientes_precio: list[PendientePrecioSemanal] = [
+            PendientePrecioSemanal(
+                empresa="intergranel",
+                empresaNombre="Intergranel",
+                solicitudId="sol-mock",
+                productoId=producto_id,
+                producto=nombre,
+                unidad="tonelada",
+                semana="del 5 al 11 de oct",
+                desde="2026-10-05",
+                hasta="2026-10-11",
+                vigenteDesde="2026-10-05T06:00:00.000Z",
+                precioActualCentavos=actual,
+            )
+            for producto_id, nombre, actual in (
+                ("p-mb", "Maíz blanco grado 1", "695000"),
+                ("p-ma", "Maíz amarillo grado 2", "650000"),
+            )
+        ]
+        self.respuestas_precio: list[dict] = []
         self._orders: dict[str, Order] = {
             "CONT-2026-0001": Order(
                 id="CONT-2026-0001",
@@ -1210,6 +1300,74 @@ class MockERPClient(ERPClient):
             atribucion="REFERENCIA" if referencia else "TELEFONO_UNICO",
             cotizacionId=(referencia or "").replace("cotizacion_flete:", "") or "c1",
             requiereRevision=sin_precio,
+        )
+
+    def _es_responsable_precio(self, telefono: str) -> bool:
+        digitos = "".join(c for c in telefono if c.isdigit())
+        if len(digitos) == 13 and digitos.startswith("521"):
+            digitos = "52" + digitos[3:]
+        return digitos == self.telefono_responsable_precio
+
+    async def precio_semanal_pendientes(self, telefono: str) -> list[PendientePrecioSemanal]:
+        if not self._es_responsable_precio(telefono):
+            return []
+        return list(self.pendientes_precio)
+
+    async def responder_precio_semanal(
+        self,
+        empresa: str,
+        solicitud_id: str,
+        producto_id: str,
+        telefono: str,
+        accion: str,
+        precio_centavos: int | None = None,
+        wamid: str | None = None,
+        texto: str | None = None,
+    ) -> RespuestaPrecioSemanal:
+        if not self._es_responsable_precio(telefono):
+            return RespuestaPrecioSemanal(registrado=False, motivo="no_autorizado")
+        renglon = next(
+            (
+                p
+                for p in self.pendientes_precio
+                if p.solicitudId == solicitud_id and p.productoId == producto_id
+            ),
+            None,
+        )
+        if renglon is None:
+            return RespuestaPrecioSemanal(registrado=False, motivo="no_encontrado")
+        precio: str | None
+        if accion == "precio":
+            if not precio_centavos or precio_centavos <= 0:
+                return RespuestaPrecioSemanal(
+                    registrado=False, motivo="precio_invalido", producto=renglon.producto
+                )
+            precio = str(precio_centavos)
+        elif accion == "mismo":
+            if renglon.precioActualCentavos is None:
+                return RespuestaPrecioSemanal(
+                    registrado=False, motivo="sin_precio_actual", producto=renglon.producto
+                )
+            precio = renglon.precioActualCentavos
+        else:
+            precio = None
+        self.pendientes_precio.remove(renglon)
+        self.respuestas_precio.append(
+            {
+                "empresa": empresa,
+                "producto_id": producto_id,
+                "accion": accion,
+                "precio_centavos": precio,
+                "wamid": wamid,
+                "texto": texto,
+            }
+        )
+        return RespuestaPrecioSemanal(
+            registrado=True,
+            producto=renglon.producto,
+            estado="OMITIDO" if accion == "omitir" else "PROGRAMADO",
+            precioCentavos=precio,
+            vigenteDesde=renglon.vigenteDesde,
         )
 
 

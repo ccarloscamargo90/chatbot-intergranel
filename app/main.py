@@ -28,6 +28,7 @@ from .handoff import HandoffStore
 from .menus import BOTONES_SEGUIMIENTO
 from .models import ChatwootEvent, ErpAvisoEvent, InventoryAlertEvent, OrderEvent
 from .notifications import notify_erp_aviso, notify_inventory_alert, notify_order_event
+from .precio_semanal import COMANDO_PRECIO, CapturaPrecioSemanal, es_solicitud_de_precio
 from .replies import Reply
 from .router import Router
 from .whatsapp import WhatsAppClient, verify_signature
@@ -57,6 +58,7 @@ router = Router()
 dedup = get_dedup_store()
 erp = get_erp_client()
 fletes = FletesPendientes(get_event_bus())
+precio_semanal = CapturaPrecioSemanal(erp, get_event_bus())
 chatwoot = get_chatwoot_client()
 handoff = HandoffStore()
 
@@ -307,6 +309,16 @@ async def _process_message(message: dict) -> None:
             # sobre precios de grano a alguien que está ofreciendo un camión.
             if await _capturar_flete(phone, message_id, text):
                 return
+            # ¿Es quien dicta el precio de la semana, contestando la pregunta del
+            # sábado? Entonces su "7,050" es un PRECIO que hay que confirmar, no
+            # una consulta para el agente de ventas.
+            if text.strip().lower() == COMANDO_PRECIO:
+                await wa.send_reply(phone, await precio_semanal.reanudar(phone))
+                return
+            capturado = await precio_semanal.atender(phone, text, message_id)
+            if capturado is not None:
+                await wa.send_reply(phone, capturado)
+                return
             reply = await router.route(phone, text)
             await wa.send_reply(phone, reply)
             return
@@ -317,6 +329,12 @@ async def _process_message(message: dict) -> None:
                 await wa.send_text(
                     phone, "No alcancé a ver qué opción eligió. ¿Puede intentarlo otra vez?"
                 )
+                return
+            # Los botones de la captura del precio (✅ Confirmar, ✏️ Corregir…)
+            # los atiende la captura; los de los menús siguen al router.
+            capturado = await precio_semanal.atender(phone, seleccion, message_id)
+            if capturado is not None:
+                await wa.send_reply(phone, capturado)
                 return
             reply = await router.route(phone, seleccion)
             await wa.send_reply(phone, reply)
@@ -478,6 +496,12 @@ async def erp_notificacion(
             await fletes.marcar(event.telefono, event.referencia, event.id)
         else:
             resultado = await notify_erp_aviso(wa, event)
+            if es_solicitud_de_precio(event.tipo):
+                # La pregunta del sábado (o el recordatorio del domingo): lo que
+                # esta persona conteste se lee como el precio, producto por
+                # producto, con botones. Se marca DESPUÉS de enviar: si Meta
+                # rechazó el aviso, no hay pregunta que contestar.
+                await precio_semanal.marcar(event.telefono, event.referencia)
     except Exception as exc:  # noqa: BLE001 - cualquier fallo tiene que soltar la marca
         # El aviso NO salió. Si la marca de deduplicación se queda puesta, el
         # reintento del ERP entra por la rama de "duplicate", que el ERP trata

@@ -373,6 +373,49 @@ class DepositoRespuestaFlete(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Precio de venta semanal dictado por WhatsApp (ERP · precio semanal)
+#
+# Los nombres van en camelCase porque llegan tal cual del ERP (NestJS).
+# --------------------------------------------------------------------------- #
+class PendientePrecioSemanal(BaseModel):
+    """Un producto al que el responsable todavía no le dicta precio."""
+
+    # Slug de la empresa: el mismo responsable puede dictar el precio de más de
+    # una del grupo, y la respuesta tiene que volver a la BD de la suya.
+    empresa: str
+    empresaNombre: str | None = None
+    solicitudId: str
+    productoId: str
+    producto: str
+    # "tonelada", "pieza"… — como se dice en la pregunta.
+    unidad: str = "unidad"
+    # "del 5 al 11 de oct"
+    semana: str = ""
+    desde: str = ""
+    hasta: str = ""
+    vigenteDesde: str = ""
+    # El precio publicado HOY, en centavos. Es lo que sigue si contesta
+    # "mismo precio"; None = el producto no tiene precio publicado.
+    precioActualCentavos: str | None = None
+
+
+class RespuestaPrecioSemanal(BaseModel):
+    """Lo que el ERP contesta al registrar el precio de un producto."""
+
+    registrado: bool
+    # no_autorizado · no_encontrado · solicitud_cerrada · ya_aplicado ·
+    # precio_invalido · sin_precio_actual
+    motivo: str | None = None
+    producto: str | None = None
+    # PROGRAMADO · APLICADO · OMITIDO
+    estado: str | None = None
+    precioCentavos: str | None = None
+    vigenteDesde: str | None = None
+    # La semana ya había empezado: entró en vigor en el momento.
+    aplicadoYa: bool = False
+
+
+# --------------------------------------------------------------------------- #
 # Autoservicio del PROVEEDOR
 #
 # Nada de lo que viaja aquí lleva marca propia: un proveedor no debe saber bajo
