@@ -49,13 +49,20 @@ from ..cotizacion_pdf import (
     nombre_archivo,
     vigencia,
 )
-from ..crm import CotizacionAunNoRegistrada, CRMNoDisponible, buscar_producto
+from ..cotizador import CotizadorGuiado
+from ..crm import CotizacionAunNoRegistrada, CRMNoDisponible, buscar_producto, normalizar
 from ..errores import detalle_http
-from ..menus import BOTONES_COTIZACION, BOTONES_VENTAS, PASO_UBICACION, leer_marca
-from ..models import CotizacionCRM
+from ..menus import (
+    BOTONES_COTIZACION,
+    BOTONES_VENTAS,
+    PASO_PRODUCTO,
+    PASO_UBICACION,
+    leer_marca,
+)
+from ..models import CatalogoCRM, CotizacionCRM
 from ..replies import Reply
 from ..whatsapp import WhatsAppClient
-from .base import BaseAgent
+from .base import BaseAgent, Herramienta
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +174,9 @@ Cuando tu pregunta tiene respuesta cerrada, el cliente la contesta con un toque.
 Para eso termina tu mensaje con UNA de estas marcas, sola en el último renglón, \
 escrita exactamente así:
 
+- `[[botones:producto]]` → la lista de granos del catálogo, para que elija con un \
+toque. Úsala SIEMPRE que preguntes qué grano quiere: nunca le escribas la lista \
+de granos como texto.
 - `[[botones:volumen]]` → cuántas toneladas (40 t / hasta 6 t / otra). Solo maíz blanco.
 - `[[botones:presentacion]]` → costal de 25 o de 50 kg. Solo maíz blanco.
 - `[[botones:costal]]` → con marca, sin marca o transparente. Solo maíz blanco.
@@ -176,6 +186,13 @@ también puede escribir su código postal.
 
 Con botones, haz UNA sola pregunta en ese mensaje: la de los botones. Una marca \
 por mensaje. El cliente nunca ve la marca: se convierte en botones.
+
+**Cotizar con botones.** Cuando el cliente toca "🧮 Cotizar", el sistema le \
+pregunta paso a paso (grano, toneladas, presentación, costal, dónde lo recibe y \
+nombre) y genera la cotización; esos pasos aparecen en la conversación. Si a \
+media cotización te escribe una duda, contéstala en uno o dos renglones y vuelve \
+a hacer la pregunta pendiente SIN marca: los botones de ese paso se agregan \
+solos. No vuelvas a preguntar lo que ya eligió.
 
 ## Cuándo pasar con un asesor
 
@@ -474,6 +491,18 @@ class Condiciones:
         return "\n".join(renglones)
 
 
+def _listo_productos(herramientas: list[Herramienta] | None) -> bool:
+    """¿En este turno se listó el catálogo con precios confiables?"""
+    for h in herramientas or []:
+        if h.nombre != "listar_productos":
+            continue
+        try:
+            return bool(json.loads(h.resultado).get("disponible"))
+        except (TypeError, ValueError, AttributeError):
+            return False
+    return False
+
+
 def folio_cotizacion(telefono: str, ahora: datetime | None = None) -> str:
     """Folio del bot para una cotización: `COT-20260908-064512-5678`.
 
@@ -501,21 +530,72 @@ class VentasAgent(BaseAgent):
     def tools(self) -> list[dict]:
         return TOOLS
 
-    async def decorate(self, phone: str, texto: str) -> Reply:
+    @property
+    def cotizador(self) -> CotizadorGuiado:
+        """La cotización con botones (ver `cotizador.py`).
+
+        Diferido a propósito: las pruebas arman el agente con `__new__` y le
+        ponen el bus a mano, y el cotizador tiene que usar ESE bus.
+        """
+        existente = getattr(self, "_cotizador", None)
+        if existente is None:
+            existente = CotizadorGuiado(self, self._bus)
+            self._cotizador = existente
+        return existente
+
+    async def catalogo(self) -> CatalogoCRM:
+        """El catálogo del CRM, tal cual. Levanta `CRMNoDisponible`."""
+        return await self._crm.catalogo()
+
+    async def cotizar(self, datos: dict, telefono: str) -> dict:
+        """Cotiza por el MISMO camino que la herramienta `generar_cotizacion`.
+
+        Lo usa el flujo guiado: una cotización hecha con botones tiene que
+        quedar igual que una hecha platicando —mismo PDF, mismo registro en
+        el CRM, misma nota para el vendedor—, o el vendedor no sabría cuál
+        de las dos mirar.
+        """
+        return json.loads(await self._cotizar(datos, telefono))
+
+    async def decorate(
+        self, phone: str, texto: str, herramientas: list[Herramienta] | None = None
+    ) -> Reply:
         """Cambia la marca de botones del modelo por los botones de verdad.
 
-        Sin marca, la respuesta lleva "Menú" y "Asesor": el asesor es la
-        salida que el guion pide para todo lo que este agente no puede
+        Sin marca, y con una cotización guiada a medias, la respuesta lleva
+        los botones del paso pendiente: el cliente preguntó algo en medio y
+        tiene que poder retomar con un toque, no reescribiendo lo que ya
+        eligió. Sin marca ni cotización, lleva "Menú" y "Asesor": el asesor es
+        la salida que el guion pide para todo lo que este agente no puede
         autorizar, y tiene que estar a un toque.
         """
         limpio, paso = leer_marca(texto)
         # Un mensaje que era solo la marca no puede salir vacío (Meta lo
         # rechaza) ni con la marca a la vista.
         limpio = limpio or "¿Me ayuda a elegir una opción, por favor?"
+        if paso == PASO_PRODUCTO:
+            return await self.cotizador.lista_de_granos(limpio)
         if paso == PASO_UBICACION:
             return Reply(texto=limpio, pedir_ubicacion=True)
         if paso in BOTONES_COTIZACION:
             return Reply(texto=limpio, botones=list(BOTONES_COTIZACION[paso]))
+        if "asesor" in normalizar(limpio):
+            # El prompt le pide al cliente que toque "👤 Asesor" abajo del
+            # mensaje: ese botón tiene que estar ahí, aunque haya una
+            # cotización a medias con otros botones pendientes.
+            return Reply(texto=limpio, botones=list(BOTONES_VENTAS))
+        pendiente = await self.cotizador.botones_para(phone)
+        if pendiente is not None and pendiente.es_interactiva:
+            return Reply(
+                texto=limpio,
+                botones=pendiente.botones,
+                lista=pendiente.lista,
+                pedir_ubicacion=pendiente.pedir_ubicacion,
+            )
+        if _listo_productos(herramientas):
+            # Acaba de decir qué se maneja: que el grano se elija con un toque
+            # y no tecleándolo (así entra a la cotización guiada).
+            return await self.cotizador.lista_de_granos(limpio)
         return Reply(texto=limpio, botones=list(BOTONES_VENTAS))
 
     async def run_tool(self, name: str, tool_input: dict, caller_phone: str) -> str:
@@ -712,6 +792,9 @@ class VentasAgent(BaseAgent):
         await self._bus.publish(
             f"bus:ventas:cotizacion:{telefono}", {**data, **envio}, ttl=86400
         )
+        # Venga del flujo guiado o de la plática, lo que sigue es cerrar u otra
+        # cotización: los botones de los pasos ya contestados no deben volver.
+        await self.cotizador.registrar_cotizada(telefono, producto.nombre, cantidad, folio)
         # El resumen va en segundo plano: lo que el cliente está esperando es
         # su PDF, no que se acabe de escribir una nota interna.
         tareas.lanzar(

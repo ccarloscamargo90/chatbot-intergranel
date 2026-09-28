@@ -5,11 +5,14 @@ Orden de decisión:
 0. Mensaje de la página web: trae `(ref: IG-…)` (ver `atribucion.py`). Se
    guarda la referencia para el CRM y se recibe a la persona como prospecto:
    bienvenida de ventas con botones, y Ventas queda como agente activo.
-1. Comando explícito: un `/comando` (`/ventas`, `/compras`, `/inventario`,
+1. Cotización con botones: "🧮 Cotizar", la lista de granos y los pasos del
+   guion (`cot_*`), y lo que se escriba para contestar el paso pendiente
+   mientras Ventas esté activo (ver `cotizador.py`).
+2. Comando explícito: un `/comando` (`/ventas`, `/compras`, `/inventario`,
    `/soporte`, `/menu`) o el id de un botón del menú (`cli_*`, `cot_*`, ver
    `menus.py`).
-2. Sesión activa en el bus (continuidad con el agente del turno anterior).
-3. Clasificación de intención con Claude Haiku (una palabra), con fallback a
+3. Sesión activa en el bus (continuidad con el agente del turno anterior).
+4. Clasificación de intención con Claude Haiku (una palabra), con fallback a
    Soporte.
 
 La respuesta es una `Reply` (texto + botones opcionales), no un string: así el
@@ -223,6 +226,28 @@ class Router:
             logger.exception("No se pudo anotar la bienvenida en el historial de %s", phone)
         return bienvenida
 
+    async def _cotizacion_guiada(self, phone: str, texto: str) -> Reply | None:
+        """La cotización con botones, si este mensaje le toca (ver `cotizador.py`).
+
+        Va ANTES que los comandos porque "🧮 Cotizar" (`cli_cotizar`) tiene su
+        frase en `ACCIONES` y, sin esto, entraría al modelo como "Quiero
+        cotizar." — que es exactamente cómo el cliente terminaba con la lista
+        de granos escrita como texto y sin un solo botón para elegir.
+
+        El texto libre solo cuenta si Ventas es el agente activo: si el cliente
+        se fue a Soporte, lo que escriba ahí no puede terminar como el nombre
+        de una cotización que dejó a medias.
+        """
+        ventas = self._agents.get("ventas")
+        cotizador = getattr(ventas, "cotizador", None)
+        if cotizador is None:
+            return None
+        activo = await self._bus.get_active_agent(phone)
+        reply = await cotizador.atender(phone, texto, texto_libre=activo == "ventas")
+        if reply is not None:
+            await self._bus.set_active_agent(phone, "ventas")
+        return reply
+
     async def route(
         self,
         phone: str,
@@ -239,6 +264,11 @@ class Router:
             if desde_la_pagina is not None:
                 agent = self._agents["ventas"]
                 return Reply.coerce(await agent.handle(phone, desde_la_pagina, desde_la_pagina))
+
+        if isinstance(content, str):
+            guiado = await self._cotizacion_guiada(phone, content)
+            if guiado is not None:
+                return guiado
 
         command = self._parse_command(text) if isinstance(content, str) else None
         if command is not None:

@@ -56,6 +56,29 @@ COT_CON_MARCA = "cot_costal_marca"
 COT_SIN_MARCA = "cot_costal_sin_marca"
 COT_TRANSPARENTE = "cot_costal_transparente"
 
+# Los del flujo guiado de cotización (ver `cotizador.py`). El grano es una fila
+# DINÁMICA —`cot_prod:<sku>`, sale del catálogo del CRM— y por eso no está en
+# `ACCIONES`: lo atiende siempre el cotizador. Los demás sí tienen frase, para
+# que un toque que llega cuando la cotización ya caducó siga llegando a Ventas
+# con una intención legible.
+PREFIJO_PRODUCTO = "cot_prod:"
+COT_ZONA_QRO = "cot_zona_qro"
+COT_ZONA_IRAPUATO = "cot_zona_irapuato"
+COT_ZONA_CELAYA = "cot_zona_celaya"
+COT_ZONA_LEON = "cot_zona_leon"
+COT_ZONA_OTRA = "cot_zona_otra"
+COT_GENERAR = "cot_generar"
+COT_CAMBIAR = "cot_cambiar"
+COT_CAMBIAR_GRANO = "cot_cambiar_grano"
+COT_CAMBIAR_TONELADAS = "cot_cambiar_ton"
+COT_CAMBIAR_PRESENTACION = "cot_cambiar_pres"
+COT_CAMBIAR_ENTREGA = "cot_cambiar_entrega"
+COT_CAMBIAR_NOMBRE = "cot_cambiar_nombre"
+COT_OTRA_COTIZACION = "cot_otra"
+# Cerrar no lo hace el bot: el guion manda cerrar con un asesor. Por eso este
+# toque va a Soporte, que es quien escala a una persona.
+COT_CERRAR = "cot_cerrar"
+
 # Los del PROVEEDOR llevan su propio prefijo `prov_`: son otra audiencia, con
 # otra sesión, y mezclar los ids haría que un toque abriera lo que no es.
 PROV_SOY_PROVEEDOR = "prov_identificarme"
@@ -99,6 +122,23 @@ ACCIONES: dict[str, Accion] = {
     COT_CON_MARCA: Accion("ventas", "Lo quiero en costal con la marca de ustedes."),
     COT_SIN_MARCA: Accion("ventas", "Lo quiero en costal sin marca."),
     COT_TRANSPARENTE: Accion("ventas", "Lo quiero en costal transparente."),
+    # --- Flujo guiado de cotización ---
+    COT_ZONA_QRO: Accion("ventas", "Lo recibo en Querétaro."),
+    COT_ZONA_IRAPUATO: Accion("ventas", "Lo recibo en Irapuato."),
+    COT_ZONA_CELAYA: Accion("ventas", "Lo recibo en Celaya."),
+    COT_ZONA_LEON: Accion("ventas", "Lo recibo en León."),
+    COT_ZONA_OTRA: Accion("ventas", "Lo necesito en otra ciudad."),
+    COT_GENERAR: Accion("ventas", "Sí, genere mi cotización."),
+    COT_CAMBIAR: Accion("ventas", "Quiero cambiar algo de mi cotización."),
+    COT_CAMBIAR_GRANO: Accion("ventas", "Quiero cambiar el grano."),
+    COT_CAMBIAR_TONELADAS: Accion("ventas", "Quiero cambiar las toneladas."),
+    COT_CAMBIAR_PRESENTACION: Accion("ventas", "Quiero cambiar la presentación."),
+    COT_CAMBIAR_ENTREGA: Accion("ventas", "Quiero cambiar dónde lo recibo."),
+    COT_CAMBIAR_NOMBRE: Accion("ventas", "Quiero cambiar el nombre de la cotización."),
+    COT_OTRA_COTIZACION: Accion("ventas", "Quiero hacer otra cotización."),
+    COT_CERRAR: Accion(
+        "soporte", "Quiero cerrar el pedido de mi cotización. Páseme con un asesor, por favor."
+    ),
     # --- Proveedor ---
     PROV_SOY_PROVEEDOR: Accion(
         "proveedores", "Soy proveedor y quiero consultar mis pagos."
@@ -111,9 +151,38 @@ ACCIONES: dict[str, Accion] = {
 }
 
 
+# --- Botones que salen de los datos del cliente ----------------------------- #
+# Tras listar sus facturas, cotizaciones o contratos, cada una es una fila que
+# se toca para recibir el documento. El folio viaja en el id y por eso no están
+# en `ACCIONES`: la frase se arma con él. No abre nada que no sea suyo: Soporte
+# busca ese folio ENTRE LOS DEL CLIENTE identificado (regla 9), así que un id
+# fabricado a mano no sirve para pedir el documento de otro.
+PREFIJO_DOC_FACTURA = "doc_factura:"
+PREFIJO_DOC_COTIZACION = "doc_cotizacion:"
+PREFIJO_DOC_CONTRATO = "doc_contrato:"
+
+_FRASE_DOCUMENTO = {
+    PREFIJO_DOC_FACTURA: "Envíame la factura {folio} en PDF y XML.",
+    PREFIJO_DOC_COTIZACION: "Envíame la cotización {folio} en PDF.",
+    PREFIJO_DOC_CONTRATO: "Envíame el contrato {folio} en PDF.",
+}
+
+# Un folio es letras, dígitos y guiones. Cualquier otra cosa no entra a la
+# frase: el id llega del teléfono del cliente y termina en el prompt.
+_FOLIO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-/]{0,39}$")
+
+
 def accion(boton_id: str) -> Accion | None:
     """La acción de un id de botón, o None si el id no es de un menú nuestro."""
-    return ACCIONES.get((boton_id or "").strip())
+    limpio = (boton_id or "").strip()
+    fija = ACCIONES.get(limpio)
+    if fija is not None:
+        return fija
+    for prefijo, frase in _FRASE_DOCUMENTO.items():
+        if limpio.startswith(prefijo):
+            folio = limpio[len(prefijo) :]
+            return Accion("soporte", frase.format(folio=folio)) if _FOLIO.match(folio) else None
+    return None
 
 
 # --- Menú principal --------------------------------------------------------- #
@@ -239,7 +308,30 @@ BOTONES_COTIZACION: dict[str, list[Boton]] = {
 #: compartir la ubicación (ver `Reply.pedir_ubicacion`).
 PASO_UBICACION = "ubicacion"
 
-PASOS_COTIZACION = frozenset({*BOTONES_COTIZACION, PASO_UBICACION})
+#: El paso cuyas opciones no están escritas aquí: la lista de granos sale del
+#: catálogo del CRM en el momento (ver `cotizador.lista_de_granos`). Escribirla
+#: a mano es como el bot terminaría ofreciendo un grano que ya no se vende.
+PASO_PRODUCTO = "producto"
+
+PASOS_COTIZACION = frozenset({*BOTONES_COTIZACION, PASO_UBICACION, PASO_PRODUCTO})
+
+#: Las ciudades a las que llega una entrega de hasta 6 t de maíz blanco (guion
+#: de ventas). El valor es cómo se escribe en la cotización.
+ZONAS_ENTREGA_CHICA: dict[str, str] = {
+    COT_ZONA_QRO: "Querétaro",
+    COT_ZONA_IRAPUATO: "Irapuato",
+    COT_ZONA_CELAYA: "Celaya",
+    COT_ZONA_LEON: "León",
+}
+
+#: Lo que se puede cambiar antes de generar la cotización.
+CAMBIOS_COTIZACION = [
+    OpcionLista(COT_CAMBIAR_GRANO, "🌾 El grano"),
+    OpcionLista(COT_CAMBIAR_TONELADAS, "⚖️ Las toneladas"),
+    OpcionLista(COT_CAMBIAR_PRESENTACION, "🛍️ Presentación y costal"),
+    OpcionLista(COT_CAMBIAR_ENTREGA, "📍 Dónde lo recibe"),
+    OpcionLista(COT_CAMBIAR_NOMBRE, "👤 El nombre"),
+]
 
 # `[[botones:presentacion]]`. Tolerante con espacios, mayúsculas y acentos
 # porque lo escribe un modelo; y TODA marca se borra del texto, se reconozca o

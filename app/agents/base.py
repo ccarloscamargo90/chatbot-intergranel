@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import abc
 import logging
+from dataclasses import dataclass
 
 import anthropic
 
@@ -28,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 # Cuántos mensajes recientes conservar por conversación.
 MAX_HISTORY = 24
+
+
+@dataclass(frozen=True)
+class Herramienta:
+    """Una herramienta que se usó en el turno: nombre, entrada y lo que devolvió (JSON)."""
+
+    nombre: str
+    entrada: dict
+    resultado: str
 
 
 class BaseAgent(abc.ABC):
@@ -101,12 +111,20 @@ class BaseAgent(abc.ABC):
         history.append({"role": "assistant", "content": respuesta})
         await self._history_store.save(key, self._trim(history))
 
-    async def decorate(self, phone: str, texto: str) -> Reply:
+    async def decorate(
+        self, phone: str, texto: str, herramientas: list[Herramienta] | None = None
+    ) -> Reply:
         """Gancho para que un agente adjunte botones a su respuesta.
 
         Por defecto la respuesta es texto pelón. Un agente que tenga un menú
         (hoy, Soporte con el autoservicio del cliente) lo sobrescribe para
         colgarle los botones que correspondan al estado de la conversación.
+
+        `herramientas` son las que se usaron en ESTE turno, con su resultado:
+        lo que se acaba de mostrar decide qué es lo siguiente a un toque (tras
+        listar facturas, mandar una de ellas; tras el saldo, el estado de
+        cuenta). Sin esto los botones serían los mismos después de cualquier
+        respuesta.
         """
         return Reply(texto=texto)
 
@@ -129,6 +147,7 @@ class BaseAgent(abc.ABC):
         history = await self._history_store.load(key)
         history.append({"role": "user", "content": content})
         user_index = len(history) - 1
+        usadas: list[Herramienta] = []
 
         # Bucle agéntico: continúa mientras Claude solicite herramientas.
         while True:
@@ -157,6 +176,7 @@ class BaseAgent(abc.ABC):
                 for block in response.content:
                     if block.type == "tool_use":
                         result = await self.run_tool(block.name, block.input, phone)
+                        usadas.append(Herramienta(block.name, dict(block.input), result))
                         tool_results.append(
                             {
                                 "type": "tool_result",
@@ -178,4 +198,4 @@ class BaseAgent(abc.ABC):
             texto = reply or (
                 "Disculpe, no pude generar una respuesta. ¿Puede reformular su mensaje?"
             )
-            return await self.decorate(phone, texto)
+            return await self.decorate(phone, texto, usadas)

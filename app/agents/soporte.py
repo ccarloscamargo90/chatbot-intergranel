@@ -36,9 +36,10 @@ from ..errores import AUTO, detalle_http
 from ..handoff import HandoffStore
 from ..menus import BOTONES_SEGUIMIENTO, menu_cliente, texto_menu
 from ..replies import Reply
+from ..seguimiento import siguiente_a_la_consulta
 from ..sesiones import SesionCliente, SesionClienteStore
 from ..whatsapp import WhatsAppClient
-from .base import BaseAgent
+from .base import BaseAgent, Herramienta
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,9 @@ que existe pero es de alguien más. Lo mismo con `enviar_mi_documento`.
 - Cuando el cliente pida una factura, mándale el PDF **y** el XML (dos llamadas \
 a `enviar_mi_documento`): el PDF es el legible, el XML es el que vale \
 fiscalmente y el que necesita su contador. Solo manda uno si lo pidió así.
+- Después de listar sus facturas, cotizaciones o contratos, abajo de tu mensaje \
+le aparece una lista con cada folio: tocar uno se lo manda. En vez de pedirle \
+que teclee el folio, dile que lo elija ahí.
 - Una cotización con `vencida: true` YA NO ES UN PRECIO. Puedes mandársela \
 (es un documento suyo y tiene derecho a verlo), pero di con claridad que esa \
 vigencia ya pasó y ofrece pedirle a un asesor un precio actualizado. Nunca \
@@ -347,12 +351,16 @@ class SoporteAgent(BaseAgent):
         return TOOLS
 
     # --- Botones ----------------------------------------------------------- #
-    async def decorate(self, phone: str, texto: str) -> Reply:
+    async def decorate(
+        self, phone: str, texto: str, herramientas: list[Herramienta] | None = None
+    ) -> Reply:
         """Cuelga botones a la respuesta.
 
         Recién identificado se manda el menú completo: es el momento en que el
-        cliente descubre qué puede pedir. El resto del tiempo bastan dos
-        botones — el menú y el asesor — para no tapar la respuesta.
+        cliente descubre qué puede pedir. Después de una consulta, lo que sigue
+        sale de lo que se acaba de mostrar (`seguimiento.py`): tras listar sus
+        facturas, cada una es una fila para recibirla. Si nada aplica, bastan
+        los botones de seguimiento para no tapar la respuesta.
         """
         # Si acaba de entrar un asesor, la despedida va sin botones: tocarlos
         # ya no llevaría a ningún lado del bot, solo reenviaría el toque a la
@@ -366,6 +374,9 @@ class SoporteAgent(BaseAgent):
                 texto=f"{texto}\n\n{texto_menu(True)}",
                 lista=menu_cliente(True),
             )
+        siguiente = siguiente_a_la_consulta(herramientas)
+        if siguiente is not None:
+            return Reply(texto=texto, botones=siguiente.botones, lista=siguiente.lista)
         return Reply(texto=texto, botones=list(BOTONES_SEGUIMIENTO))
 
     # --- Herramientas ------------------------------------------------------ #

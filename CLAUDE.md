@@ -31,6 +31,9 @@ app/
   bus.py               ← Bus de eventos compartido (Redis / InMemory)
   replies.py           ← Reply/Boton/MenuLista: texto + botones, con los topes de Meta
   menus.py             ← Menú del autoservicio del cliente e ids `cli_*` → acción
+  cotizador.py         ← Cotizar con botones: el flujo guiado del guion de ventas
+  seguimiento.py       ← Los botones que siguen a una consulta (salen de los datos)
+  precio_semanal.py    ← El precio de la semana que dicta el responsable los sábados
   sesiones.py          ← Sesión del cliente identificado, sobre el bus
   chatwoot.py          ← Bandeja del asesor humano (abstracto + HTTP + mock)
   handoff.py           ← Quién está con un asesor y no con el bot
@@ -57,7 +60,7 @@ tests/
   test_inventario.py, test_avisos.py, test_clientes.py, test_botones.py,
   test_chatwoot.py, test_documentos.py, test_proveedores.py, test_fletes.py,
   test_crm.py, test_cotizacion_pdf.py, test_resumen.py, test_tareas.py,
-  test_atribucion.py
+  test_atribucion.py, test_cotizador.py, test_seguimiento.py, test_precio_semanal.py
   conftest.py           ← Fixture `soporte`: el agente con sus mocks (ERP, CRM, Chatwoot)
 docs/erp/               ← Implementación de referencia NestJS, contrato de avisos
                           (AVISOS_WHATSAPP.md) y de autoservicio del cliente
@@ -78,15 +81,20 @@ Router.route(phone, content) -> Reply
     │     → Bienvenida de ventas [🧮 Cotizar] [🔑 Ya soy cliente] [👤 Asesor]
     │       (o, si escribió algo propio, Ventas contesta eso) · activo = ventas
     │
-    ├─ 1. Comando explícito?
+    ├─ 1. Cotización con botones? (ver "Cotizar con botones")
+    │     · 🧮 Cotizar, la lista de granos (`cot_prod:<sku>`) y los pasos `cot_*`
+    │     · o lo que escribe para contestar el paso pendiente, si Ventas está activo
+    │     → `CotizadorGuiado` contesta sin pasar por ningún modelo
+    │
+    ├─ 2. Comando explícito?
     │     · /ventas, /menu, /soporte, /compras, /inventario
     │     · id de un botón del menú (cli_saldo, cli_cotizar, cot_pres_25, …)
     │     → Enrutar directamente al agente que le toca
     │
-    ├─ 2. Sesión activa en bus? (bus:session:{phone}:agente, TTL 30min)
+    ├─ 3. Sesión activa en bus? (bus:session:{phone}:agente, TTL 30min)
     │     → Mismo agente que el turno anterior (continuidad)
     │
-    └─ 3. Clasificar intención con Claude Haiku (max_tokens=20)
+    └─ 4. Clasificar intención con Claude Haiku (max_tokens=20)
           → Una palabra: ventas|compras|inventario|soporte
           → Fallback: soporte
 ```
@@ -108,9 +116,13 @@ Cada agente hereda de `BaseAgent` y define:
 cargar historial → llamar a Claude → si tool_use, ejecutar tools y continuar → persistir historial.
 MAX_HISTORY = 24 mensajes. Devuelve un `Reply`, no un string.
 
-`decorate(phone, texto) -> Reply` es el gancho para colgarle botones a la
-respuesta. Por defecto devuelve texto pelón; Soporte lo sobrescribe para mandar
-el menú o los botones de seguimiento según el estado de la conversación.
+`decorate(phone, texto, herramientas) -> Reply` es el gancho para colgarle
+botones a la respuesta. `herramientas` son las que se usaron en ESE turno, con
+su resultado (`Herramienta(nombre, entrada, resultado)`): lo que se acaba de
+mostrar decide lo siguiente a un toque. Por defecto devuelve texto pelón;
+Soporte lo sobrescribe para el menú y los botones que salen de lo consultado
+(`seguimiento.py`), y Ventas para las marcas y el paso pendiente de la
+cotización guiada.
 
 ## Bus de eventos (app/bus.py)
 
@@ -151,10 +163,60 @@ listo. `test_botones.py` falla si un id del menú —o de un botón suelto— se
 queda sin acción. El menú de cliente identificado ya va en 10 filas, el tope de
 Meta: para agregar una, hay que quitar otra.
 
+### Cotizar con botones (app/cotizador.py)
+
+"🧮 Cotizar" ya no le pregunta a un modelo: abre un **flujo definido**. Cada
+respuesta llena un dato y el flujo pregunta el siguiente que falte, siempre con
+sus botones —grano (lista del catálogo del CRM), toneladas, presentación,
+costal, dónde lo recibe, nombre— hasta un resumen con
+`[✅ Generar] [✏️ Cambiar algo] [👤 Asesor]`. Generar va por el MISMO camino que
+la herramienta `generar_cotizacion` (CRM, PDF y nota al vendedor) y termina en
+`[🤝 Cerrar pedido] [🔁 Otra cotización] [📋 Menú]`. Cerrar va a Soporte, que
+escala a un asesor: el guion manda cerrar con una persona.
+
+Por qué: el cliente recibía la lista de granos como TEXTO, con
+`[📋 Menú] [👤 Asesor]` abajo, porque para "¿qué grano?" no había marca.
+
+Cuatro cosas que el código cuida:
+
+- **Las opciones salen de los datos.** La lista de granos se arma con el
+  catálogo del CRM en el momento (sin precio: el guion pide calificar antes).
+  Sin precio, espejo viejo o CRM caído se dicen como tales, con asesor.
+- **El paso siguiente se calcula, no se guarda** (`siguiente`). Un botón de un
+  mensaje viejo llena su dato y el flujo sigue desde lo que falte.
+- **Lo que no es respuesta al paso va al modelo** (una duda, "¿el flete
+  cuánto?"), y `VentasAgent.decorate` le cuelga a su respuesta los botones del
+  paso pendiente. Cada paso se anota en el historial de Ventas para que el
+  modelo no vuelva a preguntar lo que ya se eligió.
+- **El texto libre solo cuenta si Ventas es el agente activo.** El RFC que
+  alguien teclea en Soporte no puede terminar como el nombre de una cotización
+  que dejó a medias.
+
+Qué botones lleva una respuesta del MODELO de Ventas, en orden: la marca que
+puso; si menciona un asesor, `[📋 Menú] [👤 Asesor]` (el prompt le pide al
+cliente tocar ese botón, así que tiene que estar); los del paso pendiente de la
+cotización guiada; si en el turno listó el catálogo, la lista de granos; y si
+nada aplica, `[📋 Menú] [👤 Asesor]`.
+
+Las reglas del guion (unidad de 40 t, entregas de hasta 6 t solo en Querétaro,
+Irapuato, Celaya y León, lo demás con asesor, presentación y costal) son del
+**maíz blanco** y viven en `reglas_de`. A otro grano solo se le aplica "más de
+40 t, con asesor". El cliente identificado no repite su nombre.
+
+### Botones que salen de lo consultado (app/seguimiento.py)
+
+Tras listar sus facturas, cotizaciones o contratos, cada folio es una fila
+(`doc_factura:<folio>`, `doc_cotizacion:`, `doc_contrato:`) que se toca para
+recibir el documento; tras el saldo, `[📄 Estado de cuenta] [🧾 Mis facturas]`.
+El folio viaja en el id, así que `menus.accion` arma la frase con él —y solo si
+parece un folio: el id llega del teléfono y termina en el prompt—. No abre nada
+ajeno: Soporte busca el folio entre los del cliente (regla 9).
+
 **Los pasos de la cotización también son botones** (`cot_*`). El agente de
 Ventas decide CUÁNDO preguntar terminando su mensaje con una marca
 (`[[botones:volumen]]`, `presentacion`, `costal` o `ubicacion`) y
-`VentasAgent.decorate` la cambia por los botones —o por el botón nativo de
+`VentasAgent.decorate` la cambia por los botones —`producto` por la lista de
+granos del catálogo—, o por el botón nativo de
 "Enviar ubicación" (`Reply.pedir_ubicacion`, `location_request_message`)—. Una
 marca y no una tool porque una tool costaría una vuelta más al modelo en cada
 pregunta. Toda marca se borra del texto, se reconozca o no, y
@@ -276,6 +338,34 @@ Cuatro cosas que el código cuida:
   `test_proveedores.py` lo verifica sobre las respuestas de las tools **y**
   sobre el prompt.
 
+## El precio de la semana, dictado por WhatsApp (app/precio_semanal.py)
+
+Cada sábado a las 7:00 el ERP le pregunta al responsable (en el ERP: *Inventario
+› Precio de venta › Precio semanal por WhatsApp*) el precio de venta de la semana
+siguiente. Llega por el MISMO webhook que los avisos internos, con
+`tipo: precios.semanal_solicitud`: sale con la plantilla de avisos y, si Meta lo
+acepta, el teléfono queda marcado (`bus:precio_semanal:pendiente:{tel}`).
+
+Lo que conteste ese teléfono ya no va al router: `CapturaPrecioSemanal` le
+pregunta producto por producto con `[🟰 Mismo precio] [⏸️ Después]`, lee la
+cifra y pide `[✅ Confirmar] [✏️ Corregir]` antes de mandarla al ERP. El ERP la
+pone en vigor el lunes a las 00:00 y la publica al CRM, de donde cotiza el bot.
+
+Cuatro cosas que el código cuida:
+
+- **Nada se guarda sin ✅ Confirmar**, y si la cifra se aleja más de 30% del
+  precio de hoy la confirmación lo advierte: un cero de más o de menos.
+- **Lectura determinista, sin modelo.** "7,050", "$7,050.00", "7 mil 50".
+  "7.050" (¿siete mil o siete pesos?) y dos números en un mensaje se vuelven a
+  preguntar en vez de adivinar.
+- **Quién puede dictar lo decide el ERP**, en cada respuesta: el teléfono del
+  responsable y su permiso de fijar precios. El "1" de los celulares de México
+  (521…) se compara igual que sin él (`telefono_comparable`).
+- **No secuestra la conversación.** `/menu` y los botones de los menús siguen al
+  router; "Después" pausa y `/precio` reanuda.
+
+Contrato: `docs/erp/PRECIO_SEMANAL.md`.
+
 ## Handoff a un asesor humano (app/chatwoot.py, app/handoff.py)
 
 Cuando el cliente pide una persona, `escalar_a_humano` abre una conversación en
@@ -329,7 +419,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 435 tests pasando
+pytest -q                  # 523 tests pasando
 ```
 
 ## Estado actual y fases
@@ -700,6 +790,27 @@ manda a cualquiera directo a Ventas, adivinar un consecutivo no puede bastar.
 72 h) y "le mando el precio los lunes" necesitan que el bot escriba por su
 cuenta, y fuera de la ventana de 24 h eso exige una plantilla aprobada por Meta.
 El prompt tiene prohibido prometerlo mientras no exista.
+
+### Fase 11 ✅ — Toda la conversación con botones
+Completada. Tres cambios, un mismo principio: **lo siguiente a un toque sale de
+los datos y del paso en que va la conversación, no de una lista fija**.
+
+1. **Cotizar con botones** (`app/cotizador.py`): flujo definido del guion de
+   ventas, con la lista de granos del catálogo del CRM. Ver "Cotizar con
+   botones" arriba.
+2. **Botones que salen de lo consultado** (`app/seguimiento.py`): tras listar
+   facturas, cotizaciones o contratos, cada folio es una fila para recibirlo.
+   `BaseAgent.handle` le pasa a `decorate` las herramientas del turno.
+3. **La marca `[[botones:producto]]`**: cuando el modelo pregunta qué grano, la
+   lista del catálogo, nunca un texto.
+
+### Fase 12 ✅ — El precio de la semana, dictado por WhatsApp
+Completada. Ver "El precio de la semana" arriba. Se extendió `ERPClient` con
+`precio_semanal_pendientes` y `responder_precio_semanal` (abstracto + HTTP +
+mock) y se añadieron `PendientePrecioSemanal` y `RespuestaPrecioSemanal`.
+Endpoints que el ERP expone:
+- `POST /api/v1/bot/precio-semanal/pendientes` (body `{ telefono }`) → `{ pendientes: [...] }`
+- `POST /api/v1/bot/precio-semanal/respuesta` → `{ registrado, motivo?, estado, precioCentavos, aplicadoYa }`
 
 ## Especificación de agentes
 
