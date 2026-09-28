@@ -182,6 +182,12 @@ Cuatro cosas que el código cuida:
 - **Las opciones salen de los datos.** La lista de granos se arma con el
   catálogo del CRM en el momento (sin precio: el guion pide calificar antes).
   Sin precio, espejo viejo o CRM caído se dicen como tales, con asesor.
+- **El menú solo anuncia lo que HAY** (`disponibilidad == "stock"`, subproductos
+  incluidos). Lo que va sobre pedido o en tránsito no sale en la lista, pero se
+  cotiza si el cliente lo escribe. Si hoy no hay nada en existencia, se dice así
+  con `[👤 Asesor] [📋 Menú]`: una lista sin filas Meta la rechaza entera. La
+  disponibilidad la calcula el ERP al publicar (`catalogo-estrategias.ts`): si
+  el bot dice "sobre pedido" con grano en bodega, el problema está allá.
 - **El paso siguiente se calcula, no se guarda** (`siguiente`). Un botón de un
   mensaje viejo llena su dato y el flujo sigue desde lo que falte.
 - **Lo que no es respuesta al paso va al modelo** (una duda, "¿el flete
@@ -390,7 +396,13 @@ Cuatro cosas que el código cuida y conviene no romper:
   donde el asesor lo va a ver.
 - **No prometer un asesor que nadie avisó.** Si Chatwoot no está configurado o
   falla, `escalar_a_humano` devuelve `escalado: false` y el prompt tiene prohibido
-  decir que alguien lo contactará.
+  decir que alguien lo contactará. Pero el cliente no se queda con las manos
+  vacías: sale con el **teléfono de asesores** (`ASESOR_TELEFONO_RESPALDO`,
+  446 131 2914 por omisión) y una liga `wa.me`. Los pega `SoporteAgent.decorate`
+  tomados del resultado de la herramienta —un teléfono dictado por el modelo
+  puede salir con un dígito cambiado— y sin el botón de Asesor, que volvería a
+  fallar igual. Si un mensaje no llega a la bandeja a media conversación, el
+  aviso también lo lleva.
 
 Contrato completo y qué crear en la instancia: `docs/CHATWOOT_HANDOFF.md`.
 
@@ -419,7 +431,7 @@ Cada agente puede tener una tool `transferir_a_{otro_agente}` que cambia el agen
 
 ```bash
 ruff check app/ tests/     # 0 errores
-pytest -q                  # 523 tests pasando
+pytest -q                  # 539 tests pasando
 ```
 
 ## Estado actual y fases
@@ -942,6 +954,8 @@ CHATWOOT_BASE_URL (vacío = escalamiento deshabilitado; "mock" = simulado)
 CHATWOOT_API_TOKEN, CHATWOOT_ACCOUNT_ID, CHATWOOT_INBOX_ID
 CHATWOOT_WEBHOOK_SECRET (obligatorio en producción: Chatwoot no firma)
 HANDOFF_TTL_SECONDS (8h; al vencer el bot retoma)
+ASESOR_TELEFONO_RESPALDO (524461312914; a dónde se manda al cliente si Chatwoot
+  no puede recibirlo. Vacío = el bot solo dice que no se pudo)
 ```
 
 El autoservicio del cliente no agrega variables aquí: sus topes (intentos,

@@ -148,18 +148,55 @@ def test_cotizar_ofrece_los_granos_del_catalogo_como_lista(ventas):
     (reply,) = conversar(ventas, COTIZAR)
 
     assert reply.lista is not None
+    # Solo lo que HAY: el trigo del mock viene en tránsito y no se anuncia.
     assert filas(reply) == [
         f"{PREFIJO_PRODUCTO}MAIZ-BL",
         f"{PREFIJO_PRODUCTO}MAIZ-AM",
-        f"{PREFIJO_PRODUCTO}TRIGO-CR",
         f"{PREFIJO_PRODUCTO}SORGO",
     ]
     detalles = {o.titulo: o.descripcion for o in reply.lista.opciones}
-    assert detalles["Trigo cristalino"] == "En tránsito"
+    assert detalles["Maíz blanco"] == "Disponible"
     # Sin precio no es "no lo vendemos": se dice que el precio lo da un asesor.
     assert "precio con asesor" in detalles["Sorgo dulce"]
     # El guion pide calificar antes de dar precio: la lista no lo trae.
     assert "$" not in "".join(o.descripcion for o in reply.lista.opciones)
+
+
+def _todo_sobre_pedido(ventas) -> None:
+    for p in ventas._crm._productos:
+        p.disponibilidad = "sobre_pedido"
+
+
+def test_el_menu_no_anuncia_lo_que_va_sobre_pedido(ventas):
+    """Un grano sobre pedido no está en el menú, pero se sigue cotizando si el
+    cliente lo escribe: no se esconde, solo no se anuncia."""
+    ventas._crm._productos[1].disponibilidad = "sobre_pedido"
+
+    menu, reply = conversar(ventas, COTIZAR, "maíz amarillo")
+
+    assert f"{PREFIJO_PRODUCTO}MAIZ-AM" not in filas(menu)
+    assert "¿Cuántas toneladas de *Maíz amarillo*" in reply.texto
+
+
+def test_sin_nada_en_existencia_lo_dice_y_no_manda_una_lista_vacia(ventas):
+    """Meta rechaza una lista sin filas: el mensaje entero no llegaría."""
+    _todo_sobre_pedido(ventas)
+
+    (reply,) = conversar(ventas, COTIZAR)
+
+    assert reply.lista is None
+    assert "sobre pedido" in reply.texto
+    assert ids(reply) == [ASESOR, MENU]
+
+
+def test_sin_existencia_la_lista_del_modelo_conserva_su_texto(ventas):
+    _todo_sobre_pedido(ventas)
+
+    reply = asyncio.run(ventas.cotizador.lista_de_granos("Manejamos maíz. ¿Cuál le interesa?"))
+
+    assert reply.texto == "Manejamos maíz. ¿Cuál le interesa?"
+    assert reply.lista is None
+    assert ids(reply) == [ASESOR, MENU]
 
 
 def test_un_grano_sin_precio_se_ofrece_con_asesor(ventas):
