@@ -91,6 +91,12 @@ class ChatwootClient(abc.ABC):
     async def resolver(self, conversacion_id: int) -> None:
         """Cierra la conversación (el bot retoma)."""
 
+    def url_conversacion(self, conversacion_id: int) -> str | None:
+        """La liga a la conversación en el panel, para abrirla desde el CRM.
+
+        None si no hay panel al que llevar (Chatwoot sin configurar)."""
+        return None
+
 
 class NullChatwootClient(ChatwootClient):
     """Cuando Chatwoot no está configurado.
@@ -129,6 +135,8 @@ class HTTPChatwootClient(ChatwootClient):
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base = f"{base_url.rstrip('/')}/api/v1/accounts/{account_id}"
+        # El panel web, no la API: es lo que abre el vendedor desde el CRM.
+        self._panel = f"{base_url.rstrip('/')}/app/accounts/{account_id}"
         self._token = api_token
         self._inbox_id = inbox_id
         self._transport = transport  # inyectable en pruebas
@@ -139,6 +147,9 @@ class HTTPChatwootClient(ChatwootClient):
             headers={"api_access_token": self._token, "Content-Type": "application/json"},
             transport=self._transport,
         )
+
+    def url_conversacion(self, conversacion_id: int) -> str | None:
+        return f"{self._panel}/conversations/{conversacion_id}"
 
     # --- Contacto y conversación ------------------------------------------- #
     async def abrir_conversacion(
@@ -281,6 +292,9 @@ class MockChatwootClient(ChatwootClient):
             self.conversaciones[conv.id] = conv
             self._por_telefono[telefono] = conv.id
         return ConversacionChatwoot(id=conv.id, contacto_id=conv.id, source_id=telefono)
+
+    def url_conversacion(self, conversacion_id: int) -> str | None:
+        return f"https://chatwoot.mock/app/accounts/1/conversations/{conversacion_id}"
 
     def _conv(self, conversacion_id: int) -> _ConversacionMock:
         conv = self.conversaciones.get(conversacion_id)

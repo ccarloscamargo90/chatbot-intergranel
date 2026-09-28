@@ -557,7 +557,13 @@ class SoporteAgent(BaseAgent):
         logger.info(
             "Escalado %s a la conversación %s de Chatwoot", telefono, conversacion.id
         )
-        self._contexto_al_crm(telefono, sesion, motivo, atendido=True)
+        self._contexto_al_crm(
+            telefono,
+            sesion,
+            motivo,
+            atendido=True,
+            url_conversacion=self._chatwoot.url_conversacion(conversacion.id),
+        )
         return {
             "escalado": True,
             "instruccion": (
@@ -604,6 +610,7 @@ class SoporteAgent(BaseAgent):
         motivo: str,
         *,
         atendido: bool,
+        url_conversacion: str | None = None,
     ) -> None:
         """Arranca la nota del prospecto en el CRM, sin hacer esperar a nadie.
 
@@ -617,7 +624,9 @@ class SoporteAgent(BaseAgent):
         esperando.
         """
         tareas.lanzar(
-            self._nota_de_canalizacion(telefono, sesion, motivo, atendido=atendido),
+            self._nota_de_canalizacion(
+                telefono, sesion, motivo, atendido=atendido, url_conversacion=url_conversacion
+            ),
             nombre=f"resumen-canalizacion:{telefono}",
         )
 
@@ -628,6 +637,7 @@ class SoporteAgent(BaseAgent):
         motivo: str,
         *,
         atendido: bool,
+        url_conversacion: str | None = None,
     ) -> None:
         hechos = [f"- Pidió hablar con una persona. Motivo: {motivo}."]
         if sesion is not None:
@@ -642,12 +652,19 @@ class SoporteAgent(BaseAgent):
         referencia = await ReferenciasWeb(self._bus).leer(telefono)
         if referencia:
             hechos.append(f"- Llegó por el WhatsApp de la página web (ref {referencia}).")
-        hechos.append(
-            "- Ya está en la bandeja del asesor y el bot dejó de contestarle."
-            if atendido
-            else "- NO se le pudo pasar con un asesor: se le pidió intentar más "
-            "tarde. Hay que buscarlo."
-        )
+        if atendido:
+            hechos.append("- Ya está en la bandeja del asesor y el bot dejó de contestarle.")
+        else:
+            respaldo = asesor_de_respaldo()
+            hechos.append(
+                "- NO se le pudo pasar con un asesor por Chatwoot"
+                + (
+                    f": se le dio el teléfono de asesores ({respaldo.telefono})."
+                    if respaldo
+                    else "."
+                )
+                + " Hay que buscarlo."
+            )
 
         historial = await self._history_store.load(self._history_key(telefono))
         texto = await resumen.redactar(hechos=hechos, historial=historial)
@@ -668,6 +685,8 @@ class SoporteAgent(BaseAgent):
                 folio_cotizacion=await self._folio_cotizado(telefono),
                 rfc=sesion.rfc if sesion else None,
                 referencia_contacto=referencia,
+                # La liga a la conversación: el vendedor la abre desde la ficha.
+                url_conversacion=url_conversacion,
             )
         except CRMNoDisponible as exc:
             # El asesor ya tiene su nota privada en Chatwoot; lo que se pierde

@@ -19,6 +19,7 @@ from app.agents.base import Herramienta
 from app.bus import InMemoryEventBus
 from app.chatwoot import (
     ChatwootNoDisponible,
+    HTTPChatwootClient,
     MockChatwootClient,
     NullChatwootClient,
 )
@@ -465,6 +466,26 @@ def test_el_resumen_de_la_platica_queda_en_el_crm(soporte):
     assert "Ya está en la bandeja del asesor" in nota["resumen"]
 
 
+def test_la_nota_del_crm_lleva_la_liga_a_la_conversacion(soporte):
+    """El vendedor abre la conversación del asesor desde la ficha del CRM, sin
+    buscar al cliente en Chatwoot."""
+    _escalar(soporte)
+
+    conv_id = next(iter(soporte._chatwoot.conversaciones))
+    assert soporte._crm.canalizaciones[0]["url_conversacion"] == (
+        f"https://chatwoot.mock/app/accounts/1/conversations/{conv_id}"
+    )
+
+
+def test_la_liga_es_la_del_panel_no_la_de_la_api():
+    cliente = HTTPChatwootClient(
+        "https://chatwoot.intergranel.mx/", api_token="t", account_id=3, inbox_id=7
+    )
+    assert cliente.url_conversacion(42) == (
+        "https://chatwoot.intergranel.mx/app/accounts/3/conversations/42"
+    )
+
+
 def test_si_se_identifico_la_nota_lleva_su_razon_social_y_rfc(soporte):
     _run(soporte, "identificar_cliente", {"nombre": "Molinos del Bajío", "rfc": "MBA950101AB1"})
     _escalar(soporte)
@@ -515,7 +536,12 @@ def test_sin_chatwoot_el_vendedor_igual_se_entera(soporte):
 
     assert data["escalado"] is False
     assert len(soporte._crm.canalizaciones) == 1
-    assert "NO se le pudo pasar con un asesor" in soporte._crm.canalizaciones[0]["resumen"]
+    nota = soporte._crm.canalizaciones[0]
+    assert "NO se le pudo pasar con un asesor" in nota["resumen"]
+    # Sin conversación no hay liga: el vendedor le escribe por WhatsApp.
+    assert nota["url_conversacion"] is None
+    # Y la nota dice lo que SÍ se le dio al cliente, no "intente más tarde".
+    assert "446 131 2914" in nota["resumen"]
 
 
 def test_si_chatwoot_falla_la_nota_lo_dice(soporte):
