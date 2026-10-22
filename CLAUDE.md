@@ -913,6 +913,7 @@ Endpoints que el ERP expone:
 | consultar_oc | folio | Estado y detalles de una OC del ERP |
 | listar_oc_pendientes | — | OC pendientes de confirmar (ERP) |
 | listar_proveedores | — | Proveedores registrados (ERP) |
+| transferir_a_ventas | motivo | Cambia agente activo en bus |
 
 **Crear o confirmar una OC no se hace por WhatsApp** (decisión de Carlos,
 22-oct-2026, entrega 1d de «un documento por concepto» del ERP): una orden real
@@ -923,7 +924,6 @@ ERP, en Compras › Órdenes de compra; el prompt lo dice así. Antes `crear_oc`
 BOC) que Compras no veía; hoy el ERP responde 410 a esas rutas y consulta las
 órdenes reales. El `estado` es el del ERP en minúsculas (`pendiente`,
 `confirmada`, `en_transito`, `recibida`, `cancelada`).
-| transferir_a_ventas | motivo | Cambia agente activo en bus |
 
 Acceso restringido por lista blanca `COMPRAS_PHONES_ALLOWED` (vacía = sin
 restricción en desarrollo). `transferir_a_ventas` no requiere autorización.
