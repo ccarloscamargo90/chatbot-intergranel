@@ -81,24 +81,13 @@ def test_list_pending_purchase_orders_mock():
     assert [o.id for o in ocs] == ["OC-2026-0001"]
 
 
-def test_create_purchase_order_mock():
-    erp = MockERPClient()
-    oc = asyncio.run(erp.create_purchase_order("Proveedor X", "trigo", 50))
-    assert oc.estado == "pendiente"
-    # Queda registrada y consultable.
-    assert asyncio.run(erp.get_purchase_order(oc.id)) is not None
+def test_crear_y_aprobar_oc_ya_no_existen_en_el_cliente():
+    """El ERP responde 410 a crear/aprobar por el bot: se hace en Compras."""
+    from app.erp import ERPClient, HTTPERPClient
 
-
-def test_approve_purchase_order_mock():
-    erp = MockERPClient()
-    oc = asyncio.run(erp.approve_purchase_order("OC-2026-0001"))
-    assert oc is not None
-    assert oc.estado == "aprobada"
-
-
-def test_approve_purchase_order_mock_inexistente():
-    erp = MockERPClient()
-    assert asyncio.run(erp.approve_purchase_order("OC-9999")) is None
+    for clase in (ERPClient, HTTPERPClient, MockERPClient):
+        assert not hasattr(clase, "create_purchase_order")
+        assert not hasattr(clase, "approve_purchase_order")
 
 
 def test_list_suppliers_mock():
@@ -303,47 +292,6 @@ def test_list_pending_purchase_orders_http_ok():
 
     ocs = asyncio.run(_make_client(handler).list_pending_purchase_orders())
     assert [o.id for o in ocs] == ["OC-1"]
-
-
-def test_create_purchase_order_http_ok():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/bot/oc"
-        body = json.loads(request.content)
-        assert body == {"proveedor": "X", "producto": "trigo", "cantidad": 50.0}
-        return httpx.Response(
-            200,
-            json={
-                "id": "OC-2",
-                "proveedor": "X",
-                "producto": "trigo",
-                "cantidad": 50.0,
-                "estado": "pendiente",
-            },
-        )
-
-    oc = asyncio.run(_make_client(handler).create_purchase_order("X", "trigo", 50.0))
-    assert oc.id == "OC-2"
-
-
-def test_approve_purchase_order_http_ok():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "PATCH"
-        assert request.url.path == "/api/v1/bot/oc/OC-1/aprobar"
-        return httpx.Response(
-            200,
-            json={
-                "id": "OC-1",
-                "proveedor": "X",
-                "producto": "trigo",
-                "cantidad": 10.0,
-                "estado": "aprobada",
-            },
-        )
-
-    oc = asyncio.run(_make_client(handler).approve_purchase_order("OC-1"))
-    assert oc is not None
-    assert oc.estado == "aprobada"
 
 
 def test_list_suppliers_http_ok():

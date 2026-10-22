@@ -1,7 +1,11 @@
 """Agente de Compras: gestión de órdenes de compra a proveedores.
 
-Funcional contra el ERP (vía `ERPClient`): consulta y crea órdenes de compra,
-las aprueba y lista proveedores. El acceso está restringido a una lista blanca
+Funcional contra el ERP (vía `ERPClient`): consulta las órdenes de compra DEL
+ERP y lista proveedores. Crear o confirmar una orden NO se hace por WhatsApp:
+una orden real lleva proveedor y producto del catálogo, precio y una persona
+que responde por ella, y por WhatsApp no se sabe quién escribe. Se hace en el
+ERP, en Compras › Órdenes de compra (el ERP responde 410 a `POST /bot/oc` y a
+`PATCH /bot/oc/:folio/aprobar`). El acceso está restringido a una lista blanca
 de teléfonos autorizados (`COMPRAS_PHONES_ALLOWED`); si la lista está vacía no
 se aplica restricción (modo desarrollo).
 """
@@ -22,17 +26,17 @@ Atiendes al equipo interno de abastecimiento.
 
 Tu trabajo:
 - Consultar una orden de compra por folio con `consultar_oc`.
-- Listar las OC pendientes de aprobación con `listar_oc_pendientes`.
-- Crear una nueva OC a un proveedor con `crear_oc` (proveedor, producto, toneladas).
-- Aprobar una OC por folio con `aprobar_oc`.
+- Listar las OC pendientes de confirmar con `listar_oc_pendientes`.
 - Listar proveedores con `listar_proveedores`.
 - Si el usuario quiere precios de venta, cotizaciones o pedidos de clientes, \
 usa `transferir_a_ventas`.
 
 Reglas:
 - SIEMPRE usa las herramientas para folios, montos y estados. Nunca inventes datos.
-- Confirma proveedor, producto y cantidad antes de crear una OC.
-- Antes de aprobar una OC, confirma el folio con el usuario.
+- Crear o confirmar (aprobar) una orden de compra NO se hace por aquí: se hace \
+en el ERP, en Compras › Órdenes de compra, donde queda quién la pidió con su \
+proveedor, su producto y su precio. Si te lo piden, dilo así y ofrece consultarla \
+cuando exista. Nunca digas que la creaste o la aprobaste.
 - Si una herramienta indica que no estás autorizado, comunícalo con amabilidad \
 y no insistas.
 
@@ -56,30 +60,8 @@ TOOLS = [
     },
     {
         "name": "listar_oc_pendientes",
-        "description": "Lista las órdenes de compra pendientes de aprobación.",
+        "description": "Lista las órdenes de compra pendientes de confirmar.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "crear_oc",
-        "description": "Crea una nueva orden de compra a un proveedor.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "proveedor": {"type": "string", "description": "Nombre del proveedor."},
-                "producto": {"type": "string", "description": "Producto a comprar."},
-                "cantidad_ton": {"type": "number", "description": "Cantidad en toneladas."},
-            },
-            "required": ["proveedor", "producto", "cantidad_ton"],
-        },
-    },
-    {
-        "name": "aprobar_oc",
-        "description": "Aprueba una orden de compra por su folio.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"folio": {"type": "string", "description": "Folio de la OC."}},
-            "required": ["folio"],
-        },
     },
     {
         "name": "listar_proveedores",
@@ -103,8 +85,6 @@ TOOLS = [
 _RESTRICTED_TOOLS = {
     "consultar_oc",
     "listar_oc_pendientes",
-    "crear_oc",
-    "aprobar_oc",
     "listar_proveedores",
 }
 
@@ -147,27 +127,6 @@ class ComprasAgent(BaseAgent):
                 return json.dumps(
                     {"total": len(ocs), "ocs": [o.model_dump() for o in ocs]},
                     ensure_ascii=False,
-                )
-
-            if name == "crear_oc":
-                oc = await self._erp.create_purchase_order(
-                    tool_input["proveedor"],
-                    tool_input["producto"],
-                    float(tool_input["cantidad_ton"]),
-                )
-                return json.dumps(
-                    {"creada": True, "oc": oc.model_dump()}, ensure_ascii=False
-                )
-
-            if name == "aprobar_oc":
-                oc = await self._erp.approve_purchase_order(tool_input["folio"])
-                if oc is None:
-                    return json.dumps(
-                        {"encontrada": False, "folio": tool_input["folio"]},
-                        ensure_ascii=False,
-                    )
-                return json.dumps(
-                    {"aprobada": True, "oc": oc.model_dump()}, ensure_ascii=False
                 )
 
             if name == "listar_proveedores":

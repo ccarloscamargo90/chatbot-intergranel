@@ -133,17 +133,11 @@ class ERPClient(abc.ABC):
 
     @abc.abstractmethod
     async def list_pending_purchase_orders(self) -> list[PurchaseOrder]:
-        """Lista las órdenes de compra pendientes de aprobación."""
+        """Lista las órdenes de compra pendientes de confirmar.
 
-    @abc.abstractmethod
-    async def create_purchase_order(
-        self, proveedor: str, producto: str, cantidad_ton: float
-    ) -> PurchaseOrder:
-        """Crea una orden de compra (estado 'pendiente')."""
-
-    @abc.abstractmethod
-    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
-        """Aprueba una orden de compra. Devuelve None si no existe."""
+        Crear o confirmar una orden no está aquí a propósito: se hace en el ERP
+        (Compras › Órdenes de compra), donde queda quién responde por ella.
+        """
 
     @abc.abstractmethod
     async def list_suppliers(self) -> list[Supplier]:
@@ -377,29 +371,6 @@ class HTTPERPClient(ERPClient):
             )
             resp.raise_for_status()
             return [PurchaseOrder(**item) for item in resp.json()]
-
-    async def create_purchase_order(
-        self, proveedor: str, producto: str, cantidad_ton: float
-    ) -> PurchaseOrder:
-        async with self._client() as client:
-            resp = await client.post(
-                f"{self._base_url}/bot/oc",
-                json={
-                    "proveedor": proveedor,
-                    "producto": producto,
-                    "cantidad": cantidad_ton,
-                },
-            )
-            resp.raise_for_status()
-            return PurchaseOrder(**resp.json())
-
-    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
-        async with self._client() as client:
-            resp = await client.patch(f"{self._base_url}/bot/oc/{folio}/aprobar")
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return PurchaseOrder(**resp.json())
 
     async def list_suppliers(self) -> list[Supplier]:
         async with self._client() as client:
@@ -962,7 +933,7 @@ class MockERPClient(ERPClient):
                 cantidad=80.0,
                 total=380000.0,
                 moneda="MXN",
-                estado="aprobada",
+                estado="confirmada",
                 fecha="2026-05-28",
                 fecha_entrega_estimada="2026-06-10",
             ),
@@ -1049,27 +1020,6 @@ class MockERPClient(ERPClient):
         return [
             oc for oc in self._purchase_orders.values() if oc.estado == "pendiente"
         ]
-
-    async def create_purchase_order(
-        self, proveedor: str, producto: str, cantidad_ton: float
-    ) -> PurchaseOrder:
-        folio = f"OC-{int(time.time())}"
-        oc = PurchaseOrder(
-            id=folio,
-            proveedor=proveedor,
-            producto=producto,
-            cantidad=float(cantidad_ton),
-            estado="pendiente",
-        )
-        self._purchase_orders[folio] = oc
-        return oc
-
-    async def approve_purchase_order(self, folio: str) -> PurchaseOrder | None:
-        oc = self._purchase_orders.get(folio.strip().upper())
-        if oc is None:
-            return None
-        oc.estado = "aprobada"
-        return oc
 
     async def list_suppliers(self) -> list[Supplier]:
         return list(self._suppliers)

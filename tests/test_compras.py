@@ -48,25 +48,25 @@ def test_listar_oc_pendientes(compras):
     assert data["ocs"][0]["id"] == "OC-2026-0001"
 
 
-def test_crear_oc(compras):
-    data = _run(
-        compras,
-        "crear_oc",
-        {"proveedor": "X", "producto": "trigo", "cantidad_ton": 50},
-    )
-    assert data["creada"] is True
-    assert data["oc"]["estado"] == "pendiente"
+def test_crear_y_aprobar_oc_no_se_ofrecen():
+    """Crear o confirmar una orden es del ERP, donde responde una persona."""
+    nombres = {t["name"] for t in ComprasAgent.tools(ComprasAgent.__new__(ComprasAgent))}
+    assert "crear_oc" not in nombres
+    assert "aprobar_oc" not in nombres
+    assert nombres >= {"consultar_oc", "listar_oc_pendientes", "listar_proveedores"}
 
 
-def test_aprobar_oc(compras):
-    data = _run(compras, "aprobar_oc", {"folio": "OC-2026-0001"})
-    assert data["aprobada"] is True
-    assert data["oc"]["estado"] == "aprobada"
+def test_el_prompt_manda_a_crear_la_oc_al_erp():
+    from app.agents.compras import SYSTEM_PROMPT
+
+    assert "Compras › Órdenes de compra" in SYSTEM_PROMPT
+    assert "Nunca digas que la creaste o la aprobaste" in SYSTEM_PROMPT
 
 
-def test_aprobar_oc_inexistente(compras):
-    data = _run(compras, "aprobar_oc", {"folio": "OC-9999"})
-    assert data["encontrada"] is False
+def test_una_tool_retirada_no_hace_nada(compras):
+    data = _run(compras, "crear_oc", {"proveedor": "X", "producto": "trigo", "cantidad_ton": 50})
+    assert "error" in data
+    assert asyncio.run(compras._erp.get_purchase_order("OC-2026-0001")).estado == "pendiente"
 
 
 def test_listar_proveedores(compras):
