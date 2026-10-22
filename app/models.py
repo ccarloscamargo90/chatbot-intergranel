@@ -70,7 +70,8 @@ class PurchaseOrder(BaseModel):
     unidad: str = "ton"
     total: float | None = None
     moneda: str = "MXN"
-    estado: str = "pendiente"  # pendiente | aprobada | rechazada | recibida
+    # El estado del ERP en minúsculas: pendiente | confirmada | en_transito | recibida | cancelada
+    estado: str = "pendiente"
     fecha: str | None = None
     fecha_entrega_estimada: str | None = None
 
